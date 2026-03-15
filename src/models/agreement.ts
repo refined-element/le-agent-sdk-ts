@@ -87,7 +87,7 @@ export class AgentServiceAgreement {
       } else if (key === "price" && tag.length > 1) {
         const parsed = parseInt(tag[1], 10);
         agr.agreedPriceSats = isNaN(parsed) ? 0 : parsed;
-      } else if (key === "l402_endpoint" && tag.length > 1) {
+      } else if (key === "l402" && tag.length > 1) {
         agr.l402Endpoint = tag[1];
       } else if (key === "terms" && tag.length > 1) {
         agr.terms = tag[1];
@@ -152,7 +152,7 @@ export class AgentServiceAgreement {
       tags.push(["p", this.requesterPubkey, "", "requester"]);
     if (this.agreedPriceSats > 0)
       tags.push(["price", String(this.agreedPriceSats)]);
-    if (this.l402Endpoint) tags.push(["l402_endpoint", this.l402Endpoint]);
+    if (this.l402Endpoint) tags.push(["l402", this.l402Endpoint]);
     if (this.terms) tags.push(["terms", this.terms]);
     if (this.expiresAt !== null)
       tags.push(["expiration", String(this.expiresAt)]);

@@ -104,7 +104,7 @@ export class AgentCapability {
         cap.categories.push(tag[1]);
       } else if (key === "price" && tag.length > 1) {
         cap.pricing.push(AgentPricing.fromTag(tag));
-      } else if (key === "l402_endpoint" && tag.length > 1) {
+      } else if (key === "l402" && tag.length > 1) {
         cap.l402Endpoint = tag[1];
       } else if (key === "api_endpoint" && tag.length > 1) {
         cap.apiEndpoint = tag[1];
@@ -127,7 +127,7 @@ export class AgentCapability {
     if (this.serviceId) tags.push(["d", this.serviceId]);
     for (const cat of this.categories) tags.push(["s", cat]);
     for (const p of this.pricing) tags.push(p.toTag());
-    if (this.l402Endpoint) tags.push(["l402_endpoint", this.l402Endpoint]);
+    if (this.l402Endpoint) tags.push(["l402", this.l402Endpoint]);
     if (this.apiEndpoint) tags.push(["api_endpoint", this.apiEndpoint]);
     if (this.apiMethod) tags.push(["api_method", this.apiMethod]);
     if (this.schemaUrl) tags.push(["schema", this.schemaUrl]);

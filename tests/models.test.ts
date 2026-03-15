@@ -62,7 +62,7 @@ describe("AgentCapability", () => {
       ["s", "translation"],
       ["price", "10", "sats", "per-request"],
       ["price", "1", "sats", "per-token"],
-      ["l402_endpoint", "https://api.example.com/l402/translate"],
+      ["l402", "https://api.example.com/l402/translate"],
       ["api_endpoint", "https://api.example.com/translate"],
       ["api_method", "POST"],
       ["schema", "https://api.example.com/schema.json"],
@@ -102,7 +102,7 @@ describe("AgentCapability", () => {
     expect(tags).toContainEqual(["d", "test-svc"]);
     expect(tags).toContainEqual(["s", "ai"]);
     expect(tags).toContainEqual(["price", "5", "sats", "per-request"]);
-    expect(tags).toContainEqual(["l402_endpoint", "https://example.com/l402"]);
+    expect(tags).toContainEqual(["l402", "https://example.com/l402"]);
     expect(tags).toContainEqual(["t", "test"]);
   });
 
@@ -241,7 +241,7 @@ describe("AgentServiceAgreement", () => {
       ["p", "provider_pub"],
       ["p", "requester_pub"],
       ["price", "100"],
-      ["l402_endpoint", "https://api.example.com/l402/service"],
+      ["l402", "https://api.example.com/l402/service"],
       ["terms", "Max 10 requests per minute"],
       ["expiration", "1700100000"],
     ],
@@ -301,7 +301,7 @@ describe("AgentServiceAgreement", () => {
     expect(eTags).toHaveLength(2);
     expect(pTags).toHaveLength(2);
     expect(tags).toContainEqual(["price", "50"]);
-    expect(tags).toContainEqual(["l402_endpoint", "https://example.com/l402"]);
+    expect(tags).toContainEqual(["l402", "https://example.com/l402"]);
     expect(tags).toContainEqual(["terms", "Terms here"]);
     expect(tags).toContainEqual(["expiration", "1800000000"]);
   });
