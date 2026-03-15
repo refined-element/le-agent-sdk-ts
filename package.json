@@ -28,6 +28,10 @@
     "asa"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/refined-element/le-agent-sdk-ts"
+  },
   "dependencies": {
     "@noble/curves": "^2.0.1",
     "@noble/hashes": "^1.3.0",
