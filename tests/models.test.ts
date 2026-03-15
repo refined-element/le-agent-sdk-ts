@@ -150,6 +150,61 @@ describe("AgentCapability", () => {
   it("has correct KIND constant", () => {
     expect(AgentCapability.KIND).toBe(38400);
   });
+
+  it("defaults to negotiable true", () => {
+    const cap = new AgentCapability();
+    expect(cap.negotiable).toBe(true);
+    expect(cap.minPriceSats).toBeNull();
+    const tags = cap.toNostrTags();
+    expect(tags).toContainEqual(["negotiable", "true"]);
+  });
+
+  it("emits negotiable false", () => {
+    const cap = new AgentCapability({ negotiable: false });
+    const tags = cap.toNostrTags();
+    expect(tags).toContainEqual(["negotiable", "false"]);
+  });
+
+  it("emits negotiable floor", () => {
+    const cap = new AgentCapability({ negotiable: true, minPriceSats: 30000 });
+    const tags = cap.toNostrTags();
+    expect(tags).toContainEqual(["negotiable", "floor", "30000"]);
+  });
+
+  it("parses negotiable false from event", () => {
+    const cap = AgentCapability.fromNostrEvent({
+      tags: [["d", "svc"], ["negotiable", "false"]],
+    });
+    expect(cap.negotiable).toBe(false);
+    expect(cap.minPriceSats).toBeNull();
+  });
+
+  it("parses negotiable floor from event", () => {
+    const cap = AgentCapability.fromNostrEvent({
+      tags: [["d", "svc"], ["negotiable", "floor", "10000"]],
+    });
+    expect(cap.negotiable).toBe(true);
+    expect(cap.minPriceSats).toBe(10000);
+  });
+
+  it("roundtrips negotiable floor", () => {
+    const cap = new AgentCapability({
+      serviceId: "floor-rt",
+      negotiable: true,
+      minPriceSats: 5000,
+    });
+    const tags = cap.toNostrTags();
+    const restored = AgentCapability.fromNostrEvent({
+      id: "rt",
+      pubkey: "pk",
+      created_at: 1,
+      kind: 38400,
+      content: "",
+      tags,
+    });
+    expect(restored.negotiable).toBe(true);
+    expect(restored.minPriceSats).toBe(5000);
+  });
 });
 
 // --- AgentServiceRequest ---

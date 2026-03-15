@@ -49,6 +49,8 @@ export interface AgentCapabilityInit {
   apiMethod?: string | null;
   schemaUrl?: string | null;
   hashtags?: string[];
+  negotiable?: boolean;
+  minPriceSats?: number | null;
   eventId?: string;
   pubkey?: string;
   createdAt?: number;
@@ -66,6 +68,8 @@ export class AgentCapability {
   apiMethod: string | null;
   schemaUrl: string | null;
   hashtags: string[];
+  negotiable: boolean;
+  minPriceSats: number | null;
   eventId: string;
   pubkey: string;
   createdAt: number;
@@ -80,6 +84,8 @@ export class AgentCapability {
     this.apiMethod = init.apiMethod ?? null;
     this.schemaUrl = init.schemaUrl ?? null;
     this.hashtags = init.hashtags ?? [];
+    this.negotiable = init.negotiable ?? true;
+    this.minPriceSats = init.minPriceSats ?? null;
     this.eventId = init.eventId ?? "";
     this.pubkey = init.pubkey ?? "";
     this.createdAt = init.createdAt ?? 0;
@@ -114,6 +120,15 @@ export class AgentCapability {
         cap.schemaUrl = tag[1];
       } else if (key === "t" && tag.length > 1) {
         cap.hashtags.push(tag[1]);
+      } else if (key === "negotiable" && tag.length > 1) {
+        if (tag[1] === "false") {
+          cap.negotiable = false;
+        } else if (tag[1] === "true") {
+          cap.negotiable = true;
+        } else if (tag[1] === "floor" && tag.length > 2) {
+          cap.negotiable = true;
+          cap.minPriceSats = parseInt(tag[2], 10);
+        }
       }
     }
 
@@ -132,6 +147,14 @@ export class AgentCapability {
     if (this.apiMethod) tags.push(["api_method", this.apiMethod]);
     if (this.schemaUrl) tags.push(["schema", this.schemaUrl]);
     for (const ht of this.hashtags) tags.push(["t", ht]);
+
+    if (this.minPriceSats != null) {
+      tags.push(["negotiable", "floor", String(this.minPriceSats)]);
+    } else if (!this.negotiable) {
+      tags.push(["negotiable", "false"]);
+    } else {
+      tags.push(["negotiable", "true"]);
+    }
 
     return tags;
   }
