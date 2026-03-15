@@ -5,7 +5,7 @@
  * and Schnorr signing (BIP-340) via @noble/secp256k1.
  */
 
-import { schnorr } from "@noble/curves/secp256k1";
+import { schnorr } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils";
 
