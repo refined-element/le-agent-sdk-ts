@@ -1,10 +1,12 @@
 /**
- * Tests for L402 client -- challenge parsing and utilities.
+ * Tests for L402 client -- challenge parsing, MPP support, and utilities.
  */
 
 import { describe, it, expect } from "vitest";
 import {
   parseL402Challenge,
+  parseMppChallenge,
+  parsePaymentChallenge,
   decodeInvoiceAmountSats,
   validatePreimage,
   L402Client,
@@ -115,6 +117,81 @@ describe("validatePreimage", () => {
   it("rejects non-string", () => {
     // @ts-expect-error testing invalid input
     expect(validatePreimage(123)).toBe(false);
+  });
+});
+
+describe("parseMppChallenge", () => {
+  it("parses valid Payment header with all fields", () => {
+    const header =
+      'Payment realm="api.example.com", method="lightning", invoice="lnbc100n1pjtest", amount="100", currency="sat"';
+    const result = parseMppChallenge(header);
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBe("100");
+    expect(result.realm).toBe("api.example.com");
+  });
+
+  it("rejects non-lightning method", () => {
+    expect(() =>
+      parseMppChallenge('Payment method="stripe", invoice="lnbc100n1pjtest"')
+    ).toThrow();
+  });
+
+  it("rejects missing invoice", () => {
+    expect(() =>
+      parseMppChallenge('Payment method="lightning", amount="100"')
+    ).toThrow();
+  });
+
+  it("parses minimal header (invoice only, no amount/realm)", () => {
+    const result = parseMppChallenge(
+      'Payment method="lightning", invoice="lnbc100n1pjtest"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBeUndefined();
+    expect(result.realm).toBeUndefined();
+  });
+
+  it("rejects empty string", () => {
+    expect(() => parseMppChallenge("")).toThrow();
+  });
+
+  it("rejects Bearer token", () => {
+    expect(() => parseMppChallenge("Bearer some-token")).toThrow();
+  });
+});
+
+describe("parsePaymentChallenge", () => {
+  it("prefers L402 when present", () => {
+    const header = 'L402 macaroon="abc", invoice="lnbc100n1pjtest"';
+    const result = parsePaymentChallenge(header);
+    expect("macaroon" in result).toBe(true);
+    expect((result as { macaroon: string }).macaroon).toBe("abc");
+  });
+
+  it("falls back to MPP when no L402", () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc100n1pjtest", amount="50"';
+    const result = parsePaymentChallenge(header);
+    expect("macaroon" in result).toBe(false);
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect((result as { amount?: string }).amount).toBe("50");
+  });
+
+  it("throws on invalid header (neither L402 nor MPP)", () => {
+    expect(() => parsePaymentChallenge("Bearer token")).toThrow(
+      /No valid L402 or MPP challenge/
+    );
+  });
+
+  it("throws on empty header", () => {
+    expect(() => parsePaymentChallenge("")).toThrow();
+  });
+
+  it("parses legacy LSAT as L402", () => {
+    const header = 'LSAT macaroon="legacymac", invoice="lnbc_legacy"';
+    const result = parsePaymentChallenge(header);
+    expect("macaroon" in result).toBe(true);
+    expect((result as { macaroon: string }).macaroon).toBe("legacymac");
   });
 });
 

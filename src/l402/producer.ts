@@ -98,16 +98,22 @@ export class L402ProducerClient {
   }
 
   /**
-   * Verify an L402 token (macaroon + preimage) to confirm payment.
+   * Verify an L402 or MPP token to confirm payment.
    *
-   * The provider calls this after receiving an L402 token from the requester
+   * For L402: pass both macaroon and preimage.
+   * For MPP: pass null for macaroon, preimage only.
+   *
+   * The provider calls this after receiving a token from the requester
    * to validate that the invoice has been paid.
    */
   async verifyPayment(
-    macaroon: string,
+    macaroon: string | null,
     preimage: string
   ): Promise<L402VerifyResponse> {
     try {
+      const body: Record<string, string> = { preimage: preimage.trim() };
+      if (macaroon) body.macaroon = macaroon.trim();
+
       const response = await fetch(
         `${this.baseUrl}/api/l402/challenges/verify`,
         {
@@ -118,10 +124,7 @@ export class L402ProducerClient {
             Accept: "application/json",
             "User-Agent": "LE-Agent-SDK-TS/0.1.0",
           },
-          body: JSON.stringify({
-            macaroon: macaroon.trim(),
-            preimage: preimage.trim(),
-          }),
+          body: JSON.stringify(body),
         }
       );
 
