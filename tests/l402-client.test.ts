@@ -184,6 +184,22 @@ describe("parseMppChallenge", () => {
     expect(result.invoice).toBe("lnbc100n1pjtest");
   });
 
+  it("tolerates leading whitespace before Payment scheme", () => {
+    const result = parseMppChallenge(
+      '  Payment method="lightning", invoice="lnbc100n1pjtest"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+  });
+
+  it("tolerates leading whitespace with all fields", () => {
+    const result = parseMppChallenge(
+      '   Payment method="lightning", invoice="lnbc100n1pjtest", amount="100", realm="api.example.com"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBe("100");
+    expect(result.realm).toBe("api.example.com");
+  });
+
   it("rejects empty string", () => {
     expect(() => parseMppChallenge("")).toThrow();
   });

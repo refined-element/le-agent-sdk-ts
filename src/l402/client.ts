@@ -70,7 +70,7 @@ export function parseMppChallenge(header: string): MppChallenge {
   // Verify "Payment" scheme anywhere in the header value (may be preceded by
   // other schemes like "Bearer ..., Payment ...") and method="lightning"
   // (order-independent, OWS around `=` allowed).
-  if (!/(?:^|,\s*)Payment\s+/i.test(header)) {
+  if (!/(?:^\s*|,\s*)Payment\s+/i.test(header)) {
     throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
   }
   if (!MPP_METHOD_RE.test(header)) {
