@@ -265,12 +265,15 @@ export class L402Client {
         if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
           const parsed = Number(mppAmount);
           if (
-            Number.isFinite(parsed) &&
-            Number.isSafeInteger(parsed) &&
-            parsed >= 0
+            !Number.isFinite(parsed) ||
+            !Number.isSafeInteger(parsed) ||
+            parsed < 0
           ) {
-            amountSats = parsed;
+            throw new Error(
+              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+            );
           }
+          amountSats = parsed;
         }
       }
 

@@ -111,6 +111,13 @@ export class L402ProducerClient {
     preimage: string
   ): Promise<L402VerifyResponse> {
     try {
+      if (typeof preimage !== "string") {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: expected a string value",
+        };
+      }
       const trimmedPreimage = preimage.trim();
       if (!trimmedPreimage) {
         return {
@@ -128,7 +135,14 @@ export class L402ProducerClient {
       }
 
       const body: Record<string, string> = { preimage: trimmedPreimage };
-      if (macaroon !== null) {
+      if (macaroon !== null && macaroon !== undefined) {
+        if (typeof macaroon !== "string") {
+          return {
+            success: false,
+            valid: false,
+            error: "Invalid macaroon: expected a string value",
+          };
+        }
         const trimmedMacaroon = macaroon.trim();
         if (!trimmedMacaroon) {
           return {
