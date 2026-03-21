@@ -112,7 +112,17 @@ export class L402ProducerClient {
   ): Promise<L402VerifyResponse> {
     try {
       const body: Record<string, string> = { preimage: preimage.trim() };
-      if (macaroon) body.macaroon = macaroon.trim();
+      if (macaroon !== null) {
+        const trimmedMacaroon = macaroon.trim();
+        if (!trimmedMacaroon) {
+          return {
+            success: false,
+            valid: false,
+            error: "Invalid macaroon: value is empty or whitespace only",
+          };
+        }
+        body.macaroon = trimmedMacaroon;
+      }
 
       const response = await fetch(
         `${this.baseUrl}/api/l402/challenges/verify`,

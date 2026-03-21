@@ -70,9 +70,9 @@ export function parseMppChallenge(header: string): MppChallenge {
   const realmMatch = MPP_REALM_RE.exec(header);
 
   return {
-    invoice: match.groups.invoice,
-    amount: amountMatch?.groups?.amount,
-    realm: realmMatch?.groups?.realm,
+    invoice: match.groups.invoice.trim(),
+    amount: amountMatch?.groups?.amount?.trim(),
+    realm: realmMatch?.groups?.realm?.trim(),
   };
 }
 
@@ -99,9 +99,9 @@ export function parsePaymentChallenge(
     const amountMatch = MPP_AMOUNT_RE.exec(header);
     const realmMatch = MPP_REALM_RE.exec(header);
     return {
-      invoice: mppMatch.groups.invoice,
-      amount: amountMatch?.groups?.amount,
-      realm: realmMatch?.groups?.realm,
+      invoice: mppMatch.groups.invoice.trim(),
+      amount: amountMatch?.groups?.amount?.trim(),
+      realm: realmMatch?.groups?.realm?.trim(),
     };
   }
 
@@ -114,7 +114,7 @@ export type PayInvoiceCallback = (invoice: string) => Promise<string>;
 export interface L402ClientOptions {
   /** Async function to pay an invoice. Returns hex preimage. */
   payInvoiceCallback?: PayInvoiceCallback;
-  /** Cache of macaroon -> preimage for reuse. */
+  /** Cache of challenge key -> preimage for reuse. Keyed by macaroon for L402, by invoice for MPP. */
   preimageCache?: Map<string, string>;
   /** Maximum payment amount in satoshis. */
   maxAmountSats?: number;
@@ -185,28 +185,12 @@ function extractChallenge(
   const wwwAuth = lowerHeaders["www-authenticate"] ?? "";
   if (!wwwAuth) return null;
 
-  // Try L402 first (preferred)
-  const l402Match = CHALLENGE_RE.exec(wwwAuth);
-  if (l402Match) {
-    return {
-      macaroon: l402Match[1].trim(),
-      invoice: l402Match[2].trim(),
-    };
+  // Delegate parsing to the shared payment challenge parser to avoid duplication.
+  try {
+    return parsePaymentChallenge(wwwAuth);
+  } catch {
+    return null;
   }
-
-  // Try MPP
-  const mppMatch = MPP_CHALLENGE_RE.exec(wwwAuth);
-  if (mppMatch?.groups?.invoice) {
-    const amountMatch = MPP_AMOUNT_RE.exec(wwwAuth);
-    const realmMatch = MPP_REALM_RE.exec(wwwAuth);
-    return {
-      invoice: mppMatch.groups.invoice,
-      amount: amountMatch?.groups?.amount,
-      realm: realmMatch?.groups?.realm,
-    };
-  }
-
-  return null;
 }
 
 /**
@@ -352,7 +336,23 @@ export class L402Client {
     const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
 
-    const preimage = await payInvoiceCallback(challenge.invoice);
+    // Pay the invoice
+    let preimage: string;
+    try {
+      preimage = await payInvoiceCallback(challenge.invoice);
+    } catch (err) {
+      throw new Error(
+        `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
+    // Validate preimage format
+    if (!validatePreimage(preimage)) {
+      throw new Error(
+        `Invalid preimage from payment callback: expected 64-character hex string, ` +
+          `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+      );
+    }
 
     // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
     if ("macaroon" in challenge) {
