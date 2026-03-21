@@ -151,6 +151,24 @@ describe("parseMppChallenge", () => {
     expect(result.realm).toBeUndefined();
   });
 
+  it("parses header when invoice appears before method", () => {
+    const result = parseMppChallenge(
+      'Payment invoice="lnbc100n1pjtest", method="lightning"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBeUndefined();
+    expect(result.realm).toBeUndefined();
+  });
+
+  it("parses header with all fields in non-standard order", () => {
+    const result = parseMppChallenge(
+      'Payment invoice="lnbc100n1pjtest", realm="api.example.com", amount="100", method="lightning"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBe("100");
+    expect(result.realm).toBe("api.example.com");
+  });
+
   it("rejects empty string", () => {
     expect(() => parseMppChallenge("")).toThrow();
   });

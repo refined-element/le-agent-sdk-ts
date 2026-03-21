@@ -25,9 +25,12 @@ export interface MppChallenge {
 const CHALLENGE_RE =
   /(?:L402|LSAT)\s+macaroon="?([^",\s]+)"?\s*,\s*invoice="?([^",\s]+)"?/i;
 
-/** Pattern for parsing MPP Payment challenges. Requires method="lightning" and invoice="...". */
-const MPP_CHALLENGE_RE =
-  /Payment\s+.*?method="lightning".*?invoice="(?<invoice>[^"]+)"/i;
+/**
+ * Pattern for parsing MPP Payment challenges. Requires the "Payment" scheme
+ * with method="lightning" and invoice="..." parameters in any order.
+ */
+const MPP_METHOD_RE = /method="lightning"/i;
+const MPP_INVOICE_RE = /invoice="(?<invoice>[^"]+)"/i;
 const MPP_AMOUNT_RE = /amount="(?<amount>[^"]+)"/i;
 const MPP_REALM_RE = /realm="(?<realm>[^"]+)"/i;
 
@@ -61,16 +64,31 @@ export function parseL402Challenge(
  * Throws if the header is not a valid MPP challenge.
  */
 export function parseMppChallenge(header: string): MppChallenge {
-  const match = MPP_CHALLENGE_RE.exec(header);
-  if (!match?.groups?.invoice) {
+  // Verify "Payment" scheme and method="lightning" (order-independent)
+  if (!/^Payment\s+/i.test(header)) {
     throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+  if (!MPP_METHOD_RE.test(header)) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+
+  const invoiceMatch = MPP_INVOICE_RE.exec(header);
+  if (!invoiceMatch?.groups?.invoice) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+
+  const invoice = invoiceMatch.groups.invoice.trim();
+  if (!invoice) {
+    throw new Error(
+      `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
+    );
   }
 
   const amountMatch = MPP_AMOUNT_RE.exec(header);
   const realmMatch = MPP_REALM_RE.exec(header);
 
   return {
-    invoice: match.groups.invoice.trim(),
+    invoice,
     amount: amountMatch?.groups?.amount?.trim(),
     realm: realmMatch?.groups?.realm?.trim(),
   };
@@ -93,22 +111,24 @@ export function parsePaymentChallenge(
     };
   }
 
-  // Try MPP
-  const mppMatch = MPP_CHALLENGE_RE.exec(header);
-  if (mppMatch?.groups?.invoice) {
-    const invoice = mppMatch.groups.invoice.trim();
-    if (!invoice) {
-      throw new Error(
-        `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
-      );
+  // Try MPP (order-independent: check scheme + method, then extract invoice)
+  if (/^Payment\s+/i.test(header) && MPP_METHOD_RE.test(header)) {
+    const invoiceMatch = MPP_INVOICE_RE.exec(header);
+    if (invoiceMatch?.groups?.invoice) {
+      const invoice = invoiceMatch.groups.invoice.trim();
+      if (!invoice) {
+        throw new Error(
+          `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
+        );
+      }
+      const amountMatch = MPP_AMOUNT_RE.exec(header);
+      const realmMatch = MPP_REALM_RE.exec(header);
+      return {
+        invoice,
+        amount: amountMatch?.groups?.amount?.trim(),
+        realm: realmMatch?.groups?.realm?.trim(),
+      };
     }
-    const amountMatch = MPP_AMOUNT_RE.exec(header);
-    const realmMatch = MPP_REALM_RE.exec(header);
-    return {
-      invoice,
-      amount: amountMatch?.groups?.amount?.trim(),
-      realm: realmMatch?.groups?.realm?.trim(),
-    };
   }
 
   throw new Error(`No valid L402 or MPP challenge: ${header.slice(0, 80)}`);
@@ -175,9 +195,8 @@ function buildAuthHeader(
 }
 
 /**
- * Try to parse a payment challenge (L402 or MPP) from response headers.
- * Checks all WWW-Authenticate headers. Prefers L402 over MPP.
- * Returns null if no valid challenge is found.
+ * Try to parse a payment challenge (L402 or MPP) from the WWW-Authenticate
+ * header value. Prefers L402 over MPP. Returns null if no valid challenge is found.
  */
 function extractChallenge(
   responseHeaders: Record<string, string>
