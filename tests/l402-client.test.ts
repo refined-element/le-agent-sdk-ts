@@ -2,7 +2,7 @@
  * Tests for L402 client -- challenge parsing, MPP support, and utilities.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   parseL402Challenge,
   parseMppChallenge,
@@ -211,5 +211,350 @@ describe("L402Client", () => {
   it("initializes with maxAmountSats", () => {
     const client = new L402Client({ maxAmountSats: 1000 });
     expect(client).toBeDefined();
+  });
+});
+
+// --- Integration tests with mocked fetch ---
+
+const VALID_PREIMAGE = "a".repeat(64);
+const L402_HEADER =
+  'L402 macaroon="testmac123", invoice="lnbc100u1rest"';
+const MPP_HEADER =
+  'Payment method="lightning", invoice="lnbc100u1rest", amount="100"';
+
+/** Helper: create a mock Response with the given status and headers. */
+function mockResponse(
+  status: number,
+  headersInit?: Record<string, string>,
+  bodyText?: string
+): Response {
+  const h = new Headers(headersInit ?? {});
+  return new Response(bodyText ?? "", { status, headers: h });
+}
+
+describe("L402Client.access() - L402 vs MPP challenge selection", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("selects L402 challenge and builds correct Authorization header", async () => {
+    // First call returns 402 with L402 challenge
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    // Second call (after payment) returns 200
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
+
+    // Verify the Authorization header on the retry request
+    const retryCall = fetchSpy.mock.calls[1];
+    const authHeader = retryCall[1].headers["Authorization"];
+    expect(authHeader).toBe(`L402 testmac123:${VALID_PREIMAGE}`);
+  });
+
+  it("selects MPP challenge and builds correct Authorization header", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": MPP_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+
+    const retryCall = fetchSpy.mock.calls[1];
+    const authHeader = retryCall[1].headers["Authorization"];
+    expect(authHeader).toBe(
+      `Payment method="lightning", preimage="${VALID_PREIMAGE}"`
+    );
+  });
+
+  it("returns 402 response when no pay callback is configured", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+
+    const client = new L402Client(); // no payInvoiceCallback
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(402);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns non-402 responses directly without payment", async () => {
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn();
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("L402Client.access() - cache hit skips payInvoiceCallback", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses cached preimage for L402 (keyed by macaroon) and skips pay", async () => {
+    const cache = new Map([["testmac123", VALID_PREIMAGE]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn();
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      preimageCache: cache,
+    });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("uses cached preimage for MPP (keyed by invoice) and skips pay", async () => {
+    const cache = new Map([["lnbc100u1rest", VALID_PREIMAGE]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": MPP_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn();
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      preimageCache: cache,
+    });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("L402Client.access() - invalid cached preimages are evicted", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("evicts invalid cached preimage and pays fresh", async () => {
+    const cache = new Map([["testmac123", "not-valid-hex"]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      preimageCache: cache,
+    });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    // Invalid cached value should trigger a fresh payment
+    expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
+    // Cache should now have the valid preimage
+    expect(cache.get("testmac123")).toBe(VALID_PREIMAGE);
+  });
+
+  it("evicts too-short cached preimage and pays fresh", async () => {
+    const cache = new Map([["lnbc100u1rest", "abcd"]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": MPP_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      preimageCache: cache,
+    });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).toHaveBeenCalled();
+  });
+
+  it("normalizes cached preimage with leading/trailing whitespace", async () => {
+    const paddedPreimage = `  ${VALID_PREIMAGE}  `;
+    const cache = new Map([["testmac123", paddedPreimage]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn();
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      preimageCache: cache,
+    });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    // Should NOT have called pay because trimmed value is valid
+    expect(payCallback).not.toHaveBeenCalled();
+    // Cache should be updated with trimmed value
+    expect(cache.get("testmac123")).toBe(VALID_PREIMAGE);
+  });
+});
+
+describe("L402Client.payAndAccess() - cache validation", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("uses valid cached preimage and skips payment", async () => {
+    const cache = new Map([["testmac123", VALID_PREIMAGE]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn();
+    const client = new L402Client({ preimageCache: cache });
+
+    const res = await client.payAndAccess(
+      "https://example.com/resource",
+      payCallback
+    );
+    expect(res.status).toBe(200);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("evicts invalid cached preimage and pays fresh in payAndAccess", async () => {
+    const cache = new Map([["testmac123", "invalid"]]);
+
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ preimageCache: cache });
+
+    const res = await client.payAndAccess(
+      "https://example.com/resource",
+      payCallback
+    );
+    expect(res.status).toBe(200);
+    expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
+  });
+});
+
+describe("L402Client.access() - MPP amount strict validation", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("rejects MPP amount with non-digit suffix (e.g. '10sat')", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc1rest", amount="10sat"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+    // Non-strict amount "10sat" should be ignored; falls back to BOLT-11 decode.
+    // lnbc1rest has no valid amount, so maxAmountSats check is skipped.
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 5,
+    });
+
+    // Should NOT throw because the malformed amount is ignored (falls back to BOLT-11
+    // which returns undefined for "lnbc1rest", so no amount to enforce)
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+  });
+
+  it("rejects MPP amount with hex prefix (e.g. '0x10')", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc1rest", amount="0x10"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 5,
+    });
+
+    // "0x10" fails /^[0-9]+$/ test, so it's ignored
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+  });
+
+  it("enforces maxAmountSats with valid strict MPP amount", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc1rest", amount="200"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 100,
+    });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/exceeds maximum/);
+    expect(payCallback).not.toHaveBeenCalled();
   });
 });

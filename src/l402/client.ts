@@ -252,10 +252,20 @@ export class L402Client {
     if (effectiveMax !== undefined) {
       let amountSats: number | undefined;
 
-      // For MPP challenges with an explicit amount field, use it directly
-      if (!("macaroon" in challenge) && (challenge as MppChallenge).amount) {
-        const parsed = parseInt((challenge as MppChallenge).amount!, 10);
-        if (!isNaN(parsed)) amountSats = parsed;
+      // For MPP challenges with an explicit amount field, use it directly.
+      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+      if (!("macaroon" in challenge)) {
+        const mppAmount = (challenge as MppChallenge).amount;
+        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+          const parsed = Number(mppAmount);
+          if (
+            Number.isFinite(parsed) &&
+            Number.isSafeInteger(parsed) &&
+            parsed >= 0
+          ) {
+            amountSats = parsed;
+          }
+        }
       }
 
       // Fall back to BOLT-11 invoice decoding
@@ -274,6 +284,22 @@ export class L402Client {
     // Check if we have a cached preimage for this challenge
     const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
     let preimage = this.cache.get(cacheKey);
+
+    // Normalize and validate any cached preimage before use
+    if (typeof preimage === "string") {
+      const normalized = preimage.trim();
+      if (validatePreimage(normalized)) {
+        // Update cache with normalized value if it changed
+        if (normalized !== preimage) {
+          this.cache.set(cacheKey, normalized);
+        }
+        preimage = normalized;
+      } else {
+        // Evict invalid cached entry and fall back to paying the invoice
+        this.cache.delete(cacheKey);
+        preimage = undefined;
+      }
+    }
 
     if (!preimage) {
       // Pay the invoice
@@ -355,6 +381,22 @@ export class L402Client {
     // Check if we have a cached preimage for this challenge
     const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
     let preimage = this.cache.get(cacheKey);
+
+    // Normalize and validate any cached preimage before use
+    if (typeof preimage === "string") {
+      const normalized = preimage.trim();
+      if (validatePreimage(normalized)) {
+        // Update cache with normalized value if it changed
+        if (normalized !== preimage) {
+          this.cache.set(cacheKey, normalized);
+        }
+        preimage = normalized;
+      } else {
+        // Evict invalid cached entry and fall back to paying the invoice
+        this.cache.delete(cacheKey);
+        preimage = undefined;
+      }
+    }
 
     if (!preimage) {
       // Pay the invoice
