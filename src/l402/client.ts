@@ -68,16 +68,30 @@ export function parseL402Challenge(
  */
 export function parseMppChallenge(header: string): MppChallenge {
   // Verify "Payment" scheme anywhere in the header value (may be preceded by
-  // other schemes like "Bearer ..., Payment ...") and method="lightning"
-  // (order-independent, OWS around `=` allowed).
-  if (!/(?:^\s*|,\s*)Payment\s+/i.test(header)) {
-    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
-  }
-  if (!MPP_METHOD_RE.test(header)) {
+  // other schemes like "Bearer ..., Payment ...") and extract only the
+  // Payment segment so parameters from other schemes can't match.
+  const schemeMatch = /(?:^\s*|,\s*)(Payment\s+)/i.exec(header);
+  if (!schemeMatch) {
     throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
   }
 
-  const invoiceMatch = MPP_INVOICE_RE.exec(header);
+  // Extract only the Payment segment (from "Payment " to end-of-string or next scheme).
+  // A new scheme boundary is detected as `, <Token> ` where <Token> starts with a letter
+  // and is followed by whitespace (not `=`), distinguishing schemes from auth-params.
+  const segmentStart = schemeMatch.index + schemeMatch[0].length;
+  const remaining = header.substring(segmentStart);
+  // Match `, <scheme-name> ` where scheme-name is NOT followed by `=` (to distinguish
+  // from auth-params like `method="lightning"`).
+  const nextScheme = /,\s*[A-Za-z][A-Za-z0-9!#$&\-.^_`|~]*\s+(?!=)/.exec(remaining);
+  const paymentSegment = nextScheme
+    ? remaining.substring(0, nextScheme.index)
+    : remaining;
+
+  if (!MPP_METHOD_RE.test(paymentSegment)) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+
+  const invoiceMatch = MPP_INVOICE_RE.exec(paymentSegment);
   if (!invoiceMatch?.groups?.invoice) {
     throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
   }
@@ -89,8 +103,8 @@ export function parseMppChallenge(header: string): MppChallenge {
     );
   }
 
-  const amountMatch = MPP_AMOUNT_RE.exec(header);
-  const realmMatch = MPP_REALM_RE.exec(header);
+  const amountMatch = MPP_AMOUNT_RE.exec(paymentSegment);
+  const realmMatch = MPP_REALM_RE.exec(paymentSegment);
 
   return {
     invoice,
@@ -225,41 +239,18 @@ export class L402Client {
   }
 
   /**
-   * Access an L402/MPP-protected resource.
+   * Shared payment logic: enforce amount limits, check cache, pay invoice,
+   * validate preimage, and update cache. Used by both access() and payAndAccess()
+   * to avoid drift between the two code paths.
    *
-   * If a 402 is received and a pay callback is configured, the invoice
-   * is paid and the request retried with the appropriate credentials.
-   * Prefers L402 when both challenge types are present.
+   * Returns the validated preimage hex string.
    */
-  async access(
-    url: string,
-    options?: {
-      method?: string;
-      headers?: Record<string, string>;
-      body?: string;
-      maxAmountSats?: number;
-    }
-  ): Promise<Response> {
-    const method = options?.method ?? "GET";
-    const headers = { ...(options?.headers ?? {}) };
-    const body = options?.body;
-
-    const response = await fetch(url, { method, headers, body });
-
-    if (response.status !== 402) return response;
-
-    const responseHeaders: Record<string, string> = {};
-    response.headers.forEach((v, k) => {
-      responseHeaders[k] = v;
-    });
-
-    const challenge = extractChallenge(responseHeaders);
-    if (!challenge) return response;
-
-    if (!this.payCallback) return response;
-
+  private async _executePayment(
+    challenge: L402Challenge | MppChallenge,
+    payFn: PayInvoiceCallback,
+    effectiveMax: number | undefined
+  ): Promise<string> {
     // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
-    const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
     if (effectiveMax !== undefined) {
       let amountSats: number | undefined;
 
@@ -296,7 +287,8 @@ export class L402Client {
     }
 
     // Check if we have a cached preimage for this challenge
-    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
+    const cacheKey =
+      "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
     let preimage = this.cache.get(cacheKey);
 
     // Normalize and validate any cached preimage before use
@@ -317,28 +309,80 @@ export class L402Client {
 
     if (!preimage) {
       // Pay the invoice
+      let rawPreimage: unknown;
       try {
-        preimage = await this.payCallback(challenge.invoice);
+        rawPreimage = await payFn(challenge.invoice);
       } catch (err) {
         throw new Error(
           `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
         );
       }
 
+      // Runtime type check: payment callback must return a string
+      if (typeof rawPreimage !== "string") {
+        throw new Error(
+          `Payment callback must return a string preimage, got ${typeof rawPreimage}`
+        );
+      }
+
       // Normalize whitespace before validation
-      preimage = preimage.trim();
+      preimage = rawPreimage.trim();
 
       // Validate preimage format
       if (!validatePreimage(preimage)) {
         throw new Error(
           `Invalid preimage from payment callback: expected 64-character hex string, ` +
-            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+            `got length ${preimage.length}`
         );
       }
 
       // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
       this.cache.set(cacheKey, preimage);
     }
+
+    return preimage;
+  }
+
+  /**
+   * Access an L402/MPP-protected resource.
+   *
+   * If a 402 is received and a pay callback is configured, the invoice
+   * is paid and the request retried with the appropriate credentials.
+   * Prefers L402 when both challenge types are present.
+   */
+  async access(
+    url: string,
+    options?: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: string;
+      maxAmountSats?: number;
+    }
+  ): Promise<Response> {
+    const method = options?.method ?? "GET";
+    const headers = { ...(options?.headers ?? {}) };
+    const body = options?.body;
+
+    const response = await fetch(url, { method, headers, body });
+
+    if (response.status !== 402) return response;
+
+    const responseHeaders: Record<string, string> = {};
+    response.headers.forEach((v, k) => {
+      responseHeaders[k] = v;
+    });
+
+    const challenge = extractChallenge(responseHeaders);
+    if (!challenge) return response;
+
+    if (!this.payCallback) return response;
+
+    const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
+    const preimage = await this._executePayment(
+      challenge,
+      this.payCallback,
+      effectiveMax
+    );
 
     // Retry with credentials (with retry+backoff)
     headers["Authorization"] = buildAuthHeader(challenge, preimage);
@@ -393,87 +437,12 @@ export class L402Client {
     const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
 
-    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
     const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
-    if (effectiveMax !== undefined) {
-      let amountSats: number | undefined;
-
-      // For MPP challenges with an explicit amount field, use it directly.
-      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
-      if (!("macaroon" in challenge)) {
-        const mppAmount = (challenge as MppChallenge).amount;
-        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
-          const parsed = Number(mppAmount);
-          if (
-            !Number.isFinite(parsed) ||
-            !Number.isSafeInteger(parsed) ||
-            parsed < 0
-          ) {
-            throw new Error(
-              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
-            );
-          }
-          amountSats = parsed;
-        }
-      }
-
-      // Fall back to BOLT-11 invoice decoding
-      if (amountSats === undefined) {
-        amountSats = decodeInvoiceAmountSats(challenge.invoice);
-      }
-
-      if (amountSats !== undefined && amountSats > effectiveMax) {
-        throw new Error(
-          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
-            `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
-        );
-      }
-    }
-
-    // Check if we have a cached preimage for this challenge
-    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
-    let preimage = this.cache.get(cacheKey);
-
-    // Normalize and validate any cached preimage before use
-    if (typeof preimage === "string") {
-      const normalized = preimage.trim();
-      if (validatePreimage(normalized)) {
-        // Update cache with normalized value if it changed
-        if (normalized !== preimage) {
-          this.cache.set(cacheKey, normalized);
-        }
-        preimage = normalized;
-      } else {
-        // Evict invalid cached entry and fall back to paying the invoice
-        this.cache.delete(cacheKey);
-        preimage = undefined;
-      }
-    }
-
-    if (!preimage) {
-      // Pay the invoice
-      try {
-        preimage = await payInvoiceCallback(challenge.invoice);
-      } catch (err) {
-        throw new Error(
-          `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-
-      // Normalize whitespace before validation
-      preimage = preimage.trim();
-
-      // Validate preimage format
-      if (!validatePreimage(preimage)) {
-        throw new Error(
-          `Invalid preimage from payment callback: expected 64-character hex string, ` +
-            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
-        );
-      }
-
-      // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
-      this.cache.set(cacheKey, preimage);
-    }
+    const preimage = await this._executePayment(
+      challenge,
+      payInvoiceCallback,
+      effectiveMax
+    );
 
     headers["Authorization"] = buildAuthHeader(challenge, preimage);
     return fetch(url, { method, headers, body });

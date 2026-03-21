@@ -200,6 +200,31 @@ describe("parseMppChallenge", () => {
     expect(result.realm).toBe("api.example.com");
   });
 
+  it("does not match parameters from other schemes in combined header", () => {
+    // L402 has invoice="..." but Payment segment does NOT have method="lightning"
+    // This should throw because the Payment segment itself lacks the required params.
+    const combined =
+      'L402 macaroon="mac", invoice="lnbc_l402", Payment method="stripe", invoice="lnbc_mpp"';
+    expect(() => parseMppChallenge(combined)).toThrow(/Invalid MPP challenge/);
+  });
+
+  it("only parses parameters within the Payment segment boundary", () => {
+    // method="lightning" is in the Payment segment, invoice is also in Payment segment
+    // The L402 invoice should NOT be matched
+    const combined =
+      'Bearer realm="example", Payment method="lightning", invoice="lnbc_correct"';
+    const result = parseMppChallenge(combined);
+    expect(result.invoice).toBe("lnbc_correct");
+  });
+
+  it("ignores invoice from preceding L402 scheme when Payment has its own", () => {
+    // The invoice in the L402 part should not leak into the MPP result
+    const combined =
+      'L402 macaroon="mac", invoice="lnbc_wrong", Payment method="lightning", invoice="lnbc_right"';
+    const result = parseMppChallenge(combined);
+    expect(result.invoice).toBe("lnbc_right");
+  });
+
   it("rejects empty string", () => {
     expect(() => parseMppChallenge("")).toThrow();
   });
@@ -536,6 +561,72 @@ describe("L402Client.payAndAccess() - cache validation", () => {
     );
     expect(res.status).toBe(200);
     expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
+  });
+});
+
+describe("L402Client - non-string preimage from callback", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("access() throws descriptive error when callback returns undefined", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(undefined);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/must return a string preimage/);
+  });
+
+  it("access() throws descriptive error when callback returns a number", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(42);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/must return a string preimage, got number/);
+  });
+
+  it("payAndAccess() throws descriptive error when callback returns undefined", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": MPP_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(undefined);
+    const client = new L402Client();
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback)
+    ).rejects.toThrow(/must return a string preimage/);
+  });
+
+  it("payAndAccess() throws descriptive error when callback returns a number", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": MPP_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(12345);
+    const client = new L402Client();
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback)
+    ).rejects.toThrow(/must return a string preimage, got number/);
   });
 });
 
