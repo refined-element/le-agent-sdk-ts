@@ -96,10 +96,16 @@ export function parsePaymentChallenge(
   // Try MPP
   const mppMatch = MPP_CHALLENGE_RE.exec(header);
   if (mppMatch?.groups?.invoice) {
+    const invoice = mppMatch.groups.invoice.trim();
+    if (!invoice) {
+      throw new Error(
+        `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
+      );
+    }
     const amountMatch = MPP_AMOUNT_RE.exec(header);
     const realmMatch = MPP_REALM_RE.exec(header);
     return {
-      invoice: mppMatch.groups.invoice.trim(),
+      invoice,
       amount: amountMatch?.groups?.amount?.trim(),
       realm: realmMatch?.groups?.realm?.trim(),
     };

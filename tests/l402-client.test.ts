@@ -242,6 +242,7 @@ describe("L402Client.access() - L402 vs MPP challenge selection", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("selects L402 challenge and builds correct Authorization header", async () => {
@@ -317,6 +318,7 @@ describe("L402Client.access() - cache hit skips payInvoiceCallback", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("uses cached preimage for L402 (keyed by macaroon) and skips pay", async () => {
@@ -368,6 +370,7 @@ describe("L402Client.access() - invalid cached preimages are evicted", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("evicts invalid cached preimage and pays fresh", async () => {
@@ -445,6 +448,7 @@ describe("L402Client.payAndAccess() - cache validation", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("uses valid cached preimage and skips payment", async () => {
@@ -496,9 +500,10 @@ describe("L402Client.access() - MPP amount strict validation", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it("rejects MPP amount with non-digit suffix (e.g. '10sat')", async () => {
+  it("ignores non-strict MPP amount with non-digit suffix (e.g. '10sat')", async () => {
     const header =
       'Payment method="lightning", invoice="lnbc1rest", amount="10sat"';
     fetchSpy.mockResolvedValueOnce(
@@ -520,7 +525,7 @@ describe("L402Client.access() - MPP amount strict validation", () => {
     expect(res.status).toBe(200);
   });
 
-  it("rejects MPP amount with hex prefix (e.g. '0x10')", async () => {
+  it("ignores non-decimal MPP amount with hex prefix (e.g. '0x10')", async () => {
     const header =
       'Payment method="lightning", invoice="lnbc1rest", amount="0x10"';
     fetchSpy.mockResolvedValueOnce(
