@@ -169,6 +169,21 @@ describe("parseMppChallenge", () => {
     expect(result.realm).toBe("api.example.com");
   });
 
+  it("parses header with optional whitespace around '='", () => {
+    const result = parseMppChallenge(
+      'Payment method = "lightning", invoice = "lnbc100n1pjtest", amount = "50"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+    expect(result.amount).toBe("50");
+  });
+
+  it("parses Payment scheme preceded by other schemes (e.g. Bearer)", () => {
+    const result = parseMppChallenge(
+      'Bearer realm="example", Payment method="lightning", invoice="lnbc100n1pjtest"'
+    );
+    expect(result.invoice).toBe("lnbc100n1pjtest");
+  });
+
   it("rejects empty string", () => {
     expect(() => parseMppChallenge("")).toThrow();
   });
@@ -197,7 +212,7 @@ describe("parsePaymentChallenge", () => {
 
   it("throws on invalid header (neither L402 nor MPP)", () => {
     expect(() => parsePaymentChallenge("Bearer token")).toThrow(
-      /No valid L402 or MPP challenge/
+      /Invalid MPP challenge/
     );
   });
 
@@ -577,6 +592,88 @@ describe("L402Client.access() - MPP amount strict validation", () => {
 
     await expect(
       client.access("https://example.com/resource")
+    ).rejects.toThrow(/exceeds maximum/);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("L402Client.payAndAccess() - maxAmountSats enforcement", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("enforces maxAmountSats from constructor options", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc100u1rest", amount="200"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ maxAmountSats: 100 });
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback)
+    ).rejects.toThrow(/exceeds maximum/);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("enforces maxAmountSats from per-call options override", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc100u1rest", amount="200"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ maxAmountSats: 500 }); // constructor allows it
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback, {
+        maxAmountSats: 100, // per-call override rejects it
+      })
+    ).rejects.toThrow(/exceeds maximum/);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("allows payment when amount is within maxAmountSats", async () => {
+    const header =
+      'Payment method="lightning", invoice="lnbc100u1rest", amount="50"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ maxAmountSats: 100 });
+
+    const res = await client.payAndAccess(
+      "https://example.com/resource",
+      payCallback
+    );
+    expect(res.status).toBe(200);
+    expect(payCallback).toHaveBeenCalled();
+  });
+
+  it("enforces maxAmountSats via BOLT-11 decode for L402 challenges", async () => {
+    // lnbc100u1rest = 100 uBTC = 10,000 sats
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ maxAmountSats: 5000 });
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback)
     ).rejects.toThrow(/exceeds maximum/);
     expect(payCallback).not.toHaveBeenCalled();
   });

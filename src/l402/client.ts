@@ -28,11 +28,14 @@ const CHALLENGE_RE =
 /**
  * Pattern for parsing MPP Payment challenges. Requires the "Payment" scheme
  * with method="lightning" and invoice="..." parameters in any order.
+ * Allows optional whitespace (OWS) around `=` per HTTP auth-param grammar.
+ * Detects "Payment" as a distinct scheme anywhere in the header value
+ * (e.g., "Bearer ..., Payment ...").
  */
-const MPP_METHOD_RE = /method="lightning"/i;
-const MPP_INVOICE_RE = /invoice="(?<invoice>[^"]+)"/i;
-const MPP_AMOUNT_RE = /amount="(?<amount>[^"]+)"/i;
-const MPP_REALM_RE = /realm="(?<realm>[^"]+)"/i;
+const MPP_METHOD_RE = /method\s*=\s*"lightning"/i;
+const MPP_INVOICE_RE = /invoice\s*=\s*"(?<invoice>[^"]+)"/i;
+const MPP_AMOUNT_RE = /amount\s*=\s*"(?<amount>[^"]+)"/i;
+const MPP_REALM_RE = /realm\s*=\s*"(?<realm>[^"]+)"/i;
 
 /**
  * Extract an L402 challenge from response headers.
@@ -64,8 +67,10 @@ export function parseL402Challenge(
  * Throws if the header is not a valid MPP challenge.
  */
 export function parseMppChallenge(header: string): MppChallenge {
-  // Verify "Payment" scheme and method="lightning" (order-independent)
-  if (!/^Payment\s+/i.test(header)) {
+  // Verify "Payment" scheme anywhere in the header value (may be preceded by
+  // other schemes like "Bearer ..., Payment ...") and method="lightning"
+  // (order-independent, OWS around `=` allowed).
+  if (!/(?:^|,\s*)Payment\s+/i.test(header)) {
     throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
   }
   if (!MPP_METHOD_RE.test(header)) {
@@ -111,27 +116,8 @@ export function parsePaymentChallenge(
     };
   }
 
-  // Try MPP (order-independent: check scheme + method, then extract invoice)
-  if (/^Payment\s+/i.test(header) && MPP_METHOD_RE.test(header)) {
-    const invoiceMatch = MPP_INVOICE_RE.exec(header);
-    if (invoiceMatch?.groups?.invoice) {
-      const invoice = invoiceMatch.groups.invoice.trim();
-      if (!invoice) {
-        throw new Error(
-          `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
-        );
-      }
-      const amountMatch = MPP_AMOUNT_RE.exec(header);
-      const realmMatch = MPP_REALM_RE.exec(header);
-      return {
-        invoice,
-        amount: amountMatch?.groups?.amount?.trim(),
-        realm: realmMatch?.groups?.realm?.trim(),
-      };
-    }
-  }
-
-  throw new Error(`No valid L402 or MPP challenge: ${header.slice(0, 80)}`);
+  // Fallback to MPP parsing; let parseMppChallenge throw on invalid MPP
+  return parseMppChallenge(header);
 }
 
 /** Callback type for paying a Lightning invoice. Returns the preimage hex. */
@@ -388,6 +374,7 @@ export class L402Client {
       method?: string;
       headers?: Record<string, string>;
       body?: string;
+      maxAmountSats?: number;
     }
   ): Promise<Response> {
     const method = options?.method ?? "GET";
@@ -405,6 +392,43 @@ export class L402Client {
 
     const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
+
+    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
+    const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
+    if (effectiveMax !== undefined) {
+      let amountSats: number | undefined;
+
+      // For MPP challenges with an explicit amount field, use it directly.
+      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+      if (!("macaroon" in challenge)) {
+        const mppAmount = (challenge as MppChallenge).amount;
+        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+          const parsed = Number(mppAmount);
+          if (
+            !Number.isFinite(parsed) ||
+            !Number.isSafeInteger(parsed) ||
+            parsed < 0
+          ) {
+            throw new Error(
+              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+            );
+          }
+          amountSats = parsed;
+        }
+      }
+
+      // Fall back to BOLT-11 invoice decoding
+      if (amountSats === undefined) {
+        amountSats = decodeInvoiceAmountSats(challenge.invoice);
+      }
+
+      if (amountSats !== undefined && amountSats > effectiveMax) {
+        throw new Error(
+          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
+            `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
+        );
+      }
+    }
 
     // Check if we have a cached preimage for this challenge
     const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
