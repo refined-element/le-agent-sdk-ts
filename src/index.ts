@@ -25,11 +25,14 @@ export { TagParser } from "./nostr/tags.js";
 export {
   L402Client,
   parseL402Challenge,
+  parseMppChallenge,
+  parsePaymentChallenge,
   decodeInvoiceAmountSats,
   validatePreimage,
 } from "./l402/client.js";
 export type {
   L402Challenge,
+  MppChallenge,
   L402ClientOptions,
   PayInvoiceCallback,
 } from "./l402/client.js";

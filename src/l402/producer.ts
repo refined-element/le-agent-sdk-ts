@@ -98,16 +98,62 @@ export class L402ProducerClient {
   }
 
   /**
-   * Verify an L402 token (macaroon + preimage) to confirm payment.
+   * Verify an L402 or MPP token to confirm payment.
    *
-   * The provider calls this after receiving an L402 token from the requester
+   * For L402: pass both macaroon and preimage.
+   * For MPP: pass null for macaroon, preimage only.
+   *
+   * The provider calls this after receiving a token from the requester
    * to validate that the invoice has been paid.
    */
   async verifyPayment(
-    macaroon: string,
+    macaroon: string | null,
     preimage: string
   ): Promise<L402VerifyResponse> {
     try {
+      if (typeof preimage !== "string") {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: expected a string value",
+        };
+      }
+      const trimmedPreimage = preimage.trim();
+      if (!trimmedPreimage) {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: value is empty or whitespace only",
+        };
+      }
+      if (!/^[0-9a-f]{64}$/i.test(trimmedPreimage)) {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: expected 64-character hex string",
+        };
+      }
+
+      const body: Record<string, string> = { preimage: trimmedPreimage };
+      if (macaroon !== null && macaroon !== undefined) {
+        if (typeof macaroon !== "string") {
+          return {
+            success: false,
+            valid: false,
+            error: "Invalid macaroon: expected a string value",
+          };
+        }
+        const trimmedMacaroon = macaroon.trim();
+        if (!trimmedMacaroon) {
+          return {
+            success: false,
+            valid: false,
+            error: "Invalid macaroon: value is empty or whitespace only",
+          };
+        }
+        body.macaroon = trimmedMacaroon;
+      }
+
       const response = await fetch(
         `${this.baseUrl}/api/l402/challenges/verify`,
         {
@@ -118,10 +164,7 @@ export class L402ProducerClient {
             Accept: "application/json",
             "User-Agent": "LE-Agent-SDK-TS/0.1.0",
           },
-          body: JSON.stringify({
-            macaroon: macaroon.trim(),
-            preimage: preimage.trim(),
-          }),
+          body: JSON.stringify(body),
         }
       );
 

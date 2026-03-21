@@ -2,6 +2,7 @@
  * L402 HTTP client for agent service settlement (consumer side).
  *
  * Handles automatic L402 challenge parsing and payment retry flow.
+ * Supports both L402 and MPP (Machine Payments Protocol) challenges.
  */
 
 /** Parsed L402 challenge from a WWW-Authenticate header. */
@@ -10,12 +11,31 @@ export interface L402Challenge {
   invoice: string;
 }
 
+/** Parsed MPP (Machine Payments Protocol) challenge from a WWW-Authenticate header. */
+export interface MppChallenge {
+  invoice: string;
+  amount?: string;
+  realm?: string;
+}
+
 /**
  * Pattern for parsing L402/LSAT challenges from WWW-Authenticate headers.
  * Supports both quoted and unquoted formats, and both L402 and legacy LSAT prefixes.
  */
 const CHALLENGE_RE =
   /(?:L402|LSAT)\s+macaroon="?([^",\s]+)"?\s*,\s*invoice="?([^",\s]+)"?/i;
+
+/**
+ * Pattern for parsing MPP Payment challenges. Requires the "Payment" scheme
+ * with method="lightning" and invoice="..." parameters in any order.
+ * Allows optional whitespace (OWS) around `=` per HTTP auth-param grammar.
+ * Detects "Payment" as a distinct scheme anywhere in the header value
+ * (e.g., "Bearer ..., Payment ...").
+ */
+const MPP_METHOD_RE = /method\s*=\s*"lightning"/i;
+const MPP_INVOICE_RE = /invoice\s*=\s*"(?<invoice>[^"]+)"/i;
+const MPP_AMOUNT_RE = /amount\s*=\s*"(?<amount>[^"]+)"/i;
+const MPP_REALM_RE = /realm\s*=\s*"(?<realm>[^"]+)"/i;
 
 /**
  * Extract an L402 challenge from response headers.
@@ -41,13 +61,72 @@ export function parseL402Challenge(
   };
 }
 
+/**
+ * Parse an MPP (Machine Payments Protocol) challenge from a WWW-Authenticate header string.
+ * Expects `Payment method="lightning", invoice="..."` format.
+ * Throws if the header is not a valid MPP challenge.
+ */
+export function parseMppChallenge(header: string): MppChallenge {
+  // Verify "Payment" scheme anywhere in the header value (may be preceded by
+  // other schemes like "Bearer ..., Payment ...") and method="lightning"
+  // (order-independent, OWS around `=` allowed).
+  if (!/(?:^\s*|,\s*)Payment\s+/i.test(header)) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+  if (!MPP_METHOD_RE.test(header)) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+
+  const invoiceMatch = MPP_INVOICE_RE.exec(header);
+  if (!invoiceMatch?.groups?.invoice) {
+    throw new Error(`Invalid MPP challenge: ${header.slice(0, 80)}`);
+  }
+
+  const invoice = invoiceMatch.groups.invoice.trim();
+  if (!invoice) {
+    throw new Error(
+      `Invalid MPP challenge (empty invoice): ${header.slice(0, 80)}`
+    );
+  }
+
+  const amountMatch = MPP_AMOUNT_RE.exec(header);
+  const realmMatch = MPP_REALM_RE.exec(header);
+
+  return {
+    invoice,
+    amount: amountMatch?.groups?.amount?.trim(),
+    realm: realmMatch?.groups?.realm?.trim(),
+  };
+}
+
+/**
+ * Parse a payment challenge from a WWW-Authenticate header string.
+ * Prefers L402 when both formats could match. Falls back to MPP.
+ * Throws if neither format is found.
+ */
+export function parsePaymentChallenge(
+  header: string
+): L402Challenge | MppChallenge {
+  // Try L402 first (preferred)
+  const l402Match = CHALLENGE_RE.exec(header);
+  if (l402Match) {
+    return {
+      macaroon: l402Match[1].trim(),
+      invoice: l402Match[2].trim(),
+    };
+  }
+
+  // Fallback to MPP parsing; let parseMppChallenge throw on invalid MPP
+  return parseMppChallenge(header);
+}
+
 /** Callback type for paying a Lightning invoice. Returns the preimage hex. */
 export type PayInvoiceCallback = (invoice: string) => Promise<string>;
 
 export interface L402ClientOptions {
   /** Async function to pay an invoice. Returns hex preimage. */
   payInvoiceCallback?: PayInvoiceCallback;
-  /** Cache of macaroon -> preimage for reuse. */
+  /** Cache of challenge key -> preimage for reuse. Keyed by macaroon for L402, by invoice for MPP. */
   preimageCache?: Map<string, string>;
   /** Maximum payment amount in satoshis. */
   maxAmountSats?: number;
@@ -87,10 +166,52 @@ export function validatePreimage(preimage: string): boolean {
 }
 
 /**
- * Async HTTP client with L402 payment support.
+ * Build the appropriate Authorization header for a challenge.
+ * L402 challenges use `L402 <macaroon>:<preimage>`.
+ * MPP challenges use `Payment method="lightning", preimage="<hex>"`.
+ */
+function buildAuthHeader(
+  challenge: L402Challenge | MppChallenge,
+  preimage: string
+): string {
+  const isMpp = !("macaroon" in challenge);
+  return isMpp
+    ? `Payment method="lightning", preimage="${preimage}"`
+    : `L402 ${(challenge as L402Challenge).macaroon}:${preimage}`;
+}
+
+/**
+ * Try to parse a payment challenge (L402 or MPP) from the WWW-Authenticate
+ * header value. Prefers L402 over MPP. Returns null if no valid challenge is found.
+ */
+function extractChallenge(
+  responseHeaders: Record<string, string>
+): L402Challenge | MppChallenge | null {
+  // Collect all www-authenticate header values
+  const lowerHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(responseHeaders)) {
+    lowerHeaders[k.toLowerCase()] = v;
+  }
+
+  const wwwAuth = lowerHeaders["www-authenticate"] ?? "";
+  if (!wwwAuth) return null;
+
+  // Delegate parsing to the shared payment challenge parser to avoid duplication.
+  try {
+    return parsePaymentChallenge(wwwAuth);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Async HTTP client with L402 and MPP payment support.
  *
  * For full auto-payment, configure with a payInvoiceCallback.
  * Otherwise, challenges are returned via the 402 response for external handling.
+ *
+ * Supports both L402 (macaroon + preimage) and MPP (Machine Payments Protocol,
+ * preimage-only) challenges. When both are present, L402 is preferred.
  */
 export class L402Client {
   private payCallback?: PayInvoiceCallback;
@@ -104,10 +225,11 @@ export class L402Client {
   }
 
   /**
-   * Access an L402-protected resource.
+   * Access an L402/MPP-protected resource.
    *
    * If a 402 is received and a pay callback is configured, the invoice
-   * is paid and the request retried with L402 credentials.
+   * is paid and the request retried with the appropriate credentials.
+   * Prefers L402 when both challenge types are present.
    */
   async access(
     url: string,
@@ -131,45 +253,95 @@ export class L402Client {
       responseHeaders[k] = v;
     });
 
-    const challenge = parseL402Challenge(responseHeaders);
+    const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
 
     if (!this.payCallback) return response;
 
-    // Check invoice amount against limit
+    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
     const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
     if (effectiveMax !== undefined) {
-      const invoiceSats = decodeInvoiceAmountSats(challenge.invoice);
-      if (invoiceSats !== undefined && invoiceSats > effectiveMax) {
+      let amountSats: number | undefined;
+
+      // For MPP challenges with an explicit amount field, use it directly.
+      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+      if (!("macaroon" in challenge)) {
+        const mppAmount = (challenge as MppChallenge).amount;
+        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+          const parsed = Number(mppAmount);
+          if (
+            !Number.isFinite(parsed) ||
+            !Number.isSafeInteger(parsed) ||
+            parsed < 0
+          ) {
+            throw new Error(
+              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+            );
+          }
+          amountSats = parsed;
+        }
+      }
+
+      // Fall back to BOLT-11 invoice decoding
+      if (amountSats === undefined) {
+        amountSats = decodeInvoiceAmountSats(challenge.invoice);
+      }
+
+      if (amountSats !== undefined && amountSats > effectiveMax) {
         throw new Error(
-          `Invoice amount (${invoiceSats} sats) exceeds maximum allowed ` +
+          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
             `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
         );
       }
     }
 
-    // Pay the invoice
-    let preimage: string;
-    try {
-      preimage = await this.payCallback(challenge.invoice);
-    } catch (err) {
-      throw new Error(
-        `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+    // Check if we have a cached preimage for this challenge
+    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
+    let preimage = this.cache.get(cacheKey);
+
+    // Normalize and validate any cached preimage before use
+    if (typeof preimage === "string") {
+      const normalized = preimage.trim();
+      if (validatePreimage(normalized)) {
+        // Update cache with normalized value if it changed
+        if (normalized !== preimage) {
+          this.cache.set(cacheKey, normalized);
+        }
+        preimage = normalized;
+      } else {
+        // Evict invalid cached entry and fall back to paying the invoice
+        this.cache.delete(cacheKey);
+        preimage = undefined;
+      }
     }
 
-    // Validate preimage format
-    if (!validatePreimage(preimage)) {
-      throw new Error(
-        `Invalid preimage from payment callback: expected 64-character hex string, ` +
-          `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
-      );
+    if (!preimage) {
+      // Pay the invoice
+      try {
+        preimage = await this.payCallback(challenge.invoice);
+      } catch (err) {
+        throw new Error(
+          `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      // Normalize whitespace before validation
+      preimage = preimage.trim();
+
+      // Validate preimage format
+      if (!validatePreimage(preimage)) {
+        throw new Error(
+          `Invalid preimage from payment callback: expected 64-character hex string, ` +
+            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+        );
+      }
+
+      // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
+      this.cache.set(cacheKey, preimage);
     }
 
-    this.cache.set(challenge.macaroon, preimage);
-
-    // Retry with L402 credentials (with retry+backoff)
-    headers["Authorization"] = `L402 ${challenge.macaroon}:${preimage}`;
+    // Retry with credentials (with retry+backoff)
+    headers["Authorization"] = buildAuthHeader(challenge, preimage);
     const maxRetries = 3;
     let lastErr: Error | null = null;
 
@@ -192,7 +364,8 @@ export class L402Client {
   }
 
   /**
-   * Full L402 flow: request, get 402, pay invoice, retry with token.
+   * Full L402/MPP flow: request, get 402, pay invoice, retry with token.
+   * Prefers L402 when both challenge types are present.
    */
   async payAndAccess(
     url: string,
@@ -201,6 +374,7 @@ export class L402Client {
       method?: string;
       headers?: Record<string, string>;
       body?: string;
+      maxAmountSats?: number;
     }
   ): Promise<Response> {
     const method = options?.method ?? "GET";
@@ -216,13 +390,92 @@ export class L402Client {
       responseHeaders[k] = v;
     });
 
-    const challenge = parseL402Challenge(responseHeaders);
+    const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
 
-    const preimage = await payInvoiceCallback(challenge.invoice);
-    this.cache.set(challenge.macaroon, preimage);
+    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
+    const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
+    if (effectiveMax !== undefined) {
+      let amountSats: number | undefined;
 
-    headers["Authorization"] = `L402 ${challenge.macaroon}:${preimage}`;
+      // For MPP challenges with an explicit amount field, use it directly.
+      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+      if (!("macaroon" in challenge)) {
+        const mppAmount = (challenge as MppChallenge).amount;
+        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+          const parsed = Number(mppAmount);
+          if (
+            !Number.isFinite(parsed) ||
+            !Number.isSafeInteger(parsed) ||
+            parsed < 0
+          ) {
+            throw new Error(
+              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+            );
+          }
+          amountSats = parsed;
+        }
+      }
+
+      // Fall back to BOLT-11 invoice decoding
+      if (amountSats === undefined) {
+        amountSats = decodeInvoiceAmountSats(challenge.invoice);
+      }
+
+      if (amountSats !== undefined && amountSats > effectiveMax) {
+        throw new Error(
+          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
+            `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
+        );
+      }
+    }
+
+    // Check if we have a cached preimage for this challenge
+    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
+    let preimage = this.cache.get(cacheKey);
+
+    // Normalize and validate any cached preimage before use
+    if (typeof preimage === "string") {
+      const normalized = preimage.trim();
+      if (validatePreimage(normalized)) {
+        // Update cache with normalized value if it changed
+        if (normalized !== preimage) {
+          this.cache.set(cacheKey, normalized);
+        }
+        preimage = normalized;
+      } else {
+        // Evict invalid cached entry and fall back to paying the invoice
+        this.cache.delete(cacheKey);
+        preimage = undefined;
+      }
+    }
+
+    if (!preimage) {
+      // Pay the invoice
+      try {
+        preimage = await payInvoiceCallback(challenge.invoice);
+      } catch (err) {
+        throw new Error(
+          `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+
+      // Normalize whitespace before validation
+      preimage = preimage.trim();
+
+      // Validate preimage format
+      if (!validatePreimage(preimage)) {
+        throw new Error(
+          `Invalid preimage from payment callback: expected 64-character hex string, ` +
+            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+        );
+      }
+
+      // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
+      this.cache.set(cacheKey, preimage);
+    }
+
+    headers["Authorization"] = buildAuthHeader(challenge, preimage);
     return fetch(url, { method, headers, body });
   }
 }
