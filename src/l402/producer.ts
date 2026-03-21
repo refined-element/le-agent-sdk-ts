@@ -111,7 +111,23 @@ export class L402ProducerClient {
     preimage: string
   ): Promise<L402VerifyResponse> {
     try {
-      const body: Record<string, string> = { preimage: preimage.trim() };
+      const trimmedPreimage = preimage.trim();
+      if (!trimmedPreimage) {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: value is empty or whitespace only",
+        };
+      }
+      if (!/^[0-9a-f]{64}$/i.test(trimmedPreimage)) {
+        return {
+          success: false,
+          valid: false,
+          error: "Invalid preimage: expected 64-character hex string",
+        };
+      }
+
+      const body: Record<string, string> = { preimage: trimmedPreimage };
       if (macaroon !== null) {
         const trimmedMacaroon = macaroon.trim();
         if (!trimmedMacaroon) {

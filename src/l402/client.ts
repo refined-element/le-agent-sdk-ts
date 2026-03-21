@@ -247,41 +247,57 @@ export class L402Client {
 
     if (!this.payCallback) return response;
 
-    // Check invoice amount against limit
+    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
     const effectiveMax = options?.maxAmountSats ?? this.maxAmountSats;
     if (effectiveMax !== undefined) {
-      const invoiceSats = decodeInvoiceAmountSats(challenge.invoice);
-      if (invoiceSats !== undefined && invoiceSats > effectiveMax) {
+      let amountSats: number | undefined;
+
+      // For MPP challenges with an explicit amount field, use it directly
+      if (!("macaroon" in challenge) && (challenge as MppChallenge).amount) {
+        const parsed = parseInt((challenge as MppChallenge).amount!, 10);
+        if (!isNaN(parsed)) amountSats = parsed;
+      }
+
+      // Fall back to BOLT-11 invoice decoding
+      if (amountSats === undefined) {
+        amountSats = decodeInvoiceAmountSats(challenge.invoice);
+      }
+
+      if (amountSats !== undefined && amountSats > effectiveMax) {
         throw new Error(
-          `Invoice amount (${invoiceSats} sats) exceeds maximum allowed ` +
+          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
             `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
         );
       }
     }
 
-    // Pay the invoice
-    let preimage: string;
-    try {
-      preimage = await this.payCallback(challenge.invoice);
-    } catch (err) {
-      throw new Error(
-        `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    // Check if we have a cached preimage for this challenge
+    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
+    let preimage = this.cache.get(cacheKey);
 
-    // Validate preimage format
-    if (!validatePreimage(preimage)) {
-      throw new Error(
-        `Invalid preimage from payment callback: expected 64-character hex string, ` +
-          `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
-      );
-    }
+    if (!preimage) {
+      // Pay the invoice
+      try {
+        preimage = await this.payCallback(challenge.invoice);
+      } catch (err) {
+        throw new Error(
+          `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
 
-    // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
-    if ("macaroon" in challenge) {
-      this.cache.set(challenge.macaroon, preimage);
-    } else {
-      this.cache.set(challenge.invoice, preimage);
+      // Normalize whitespace before validation
+      preimage = preimage.trim();
+
+      // Validate preimage format
+      if (!validatePreimage(preimage)) {
+        throw new Error(
+          `Invalid preimage from payment callback: expected 64-character hex string, ` +
+            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+        );
+      }
+
+      // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
+      this.cache.set(cacheKey, preimage);
     }
 
     // Retry with credentials (with retry+backoff)
@@ -336,29 +352,33 @@ export class L402Client {
     const challenge = extractChallenge(responseHeaders);
     if (!challenge) return response;
 
-    // Pay the invoice
-    let preimage: string;
-    try {
-      preimage = await payInvoiceCallback(challenge.invoice);
-    } catch (err) {
-      throw new Error(
-        `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
+    // Check if we have a cached preimage for this challenge
+    const cacheKey = "macaroon" in challenge ? challenge.macaroon : challenge.invoice;
+    let preimage = this.cache.get(cacheKey);
 
-    // Validate preimage format
-    if (!validatePreimage(preimage)) {
-      throw new Error(
-        `Invalid preimage from payment callback: expected 64-character hex string, ` +
-          `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
-      );
-    }
+    if (!preimage) {
+      // Pay the invoice
+      try {
+        preimage = await payInvoiceCallback(challenge.invoice);
+      } catch (err) {
+        throw new Error(
+          `Payment callback failed: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
 
-    // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
-    if ("macaroon" in challenge) {
-      this.cache.set(challenge.macaroon, preimage);
-    } else {
-      this.cache.set(challenge.invoice, preimage);
+      // Normalize whitespace before validation
+      preimage = preimage.trim();
+
+      // Validate preimage format
+      if (!validatePreimage(preimage)) {
+        throw new Error(
+          `Invalid preimage from payment callback: expected 64-character hex string, ` +
+            `got length ${typeof preimage === "string" ? preimage.length : "N/A"}`
+        );
+      }
+
+      // Cache preimage (keyed by macaroon for L402, by invoice for MPP)
+      this.cache.set(cacheKey, preimage);
     }
 
     headers["Authorization"] = buildAuthHeader(challenge, preimage);
