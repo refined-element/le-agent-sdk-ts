@@ -18,6 +18,7 @@ export interface AgentServiceAgreementInit {
   macaroon?: string | null;
   paymentHash?: string | null;
   settlementMode?: string;
+  status?: string;
   eventId?: string;
   pubkey?: string;
   createdAt?: number;
@@ -39,6 +40,7 @@ export class AgentServiceAgreement {
   macaroon: string | null;
   paymentHash: string | null;
   settlementMode: string;
+  status: string;
   eventId: string;
   pubkey: string;
   createdAt: number;
@@ -57,6 +59,7 @@ export class AgentServiceAgreement {
     this.macaroon = init.macaroon ?? null;
     this.paymentHash = init.paymentHash ?? null;
     this.settlementMode = init.settlementMode ?? "proxy";
+    this.status = init.status ?? "proposed";
     this.eventId = init.eventId ?? "";
     this.pubkey = init.pubkey ?? "";
     this.createdAt = init.createdAt ?? 0;
@@ -94,6 +97,10 @@ export class AgentServiceAgreement {
       } else if (key === "expiration" && tag.length > 1) {
         const parsed = parseInt(tag[1], 10);
         agr.expiresAt = isNaN(parsed) ? null : parsed;
+      } else if (key === "status" && tag.length > 1) {
+        agr.status = tag[1];
+      } else if (key === "payment_hash" && tag.length > 1) {
+        agr.paymentHash = tag[1];
       }
     }
 
@@ -156,6 +163,10 @@ export class AgentServiceAgreement {
     if (this.terms) tags.push(["terms", this.terms]);
     if (this.expiresAt !== null)
       tags.push(["expiration", String(this.expiresAt)]);
+    if (this.status) tags.push(["status", this.status]);
+    if (this.status === "completed" && this.paymentHash) {
+      tags.push(["payment_hash", this.paymentHash]);
+    }
 
     return tags;
   }

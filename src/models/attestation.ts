@@ -69,6 +69,11 @@ export class AgentAttestation {
     if (this.agreementEventId) tags.push(["e", this.agreementEventId]);
     if (this.rating > 0) tags.push(["rating", String(this.rating)]);
 
+    // NIP-32 label tags for attestation domain
+    tags.push(["L", "nostr.agent.attestation"]);
+    tags.push(["l", "completed", "nostr.agent.attestation"]);
+    tags.push(["l", "commerce.service_completion", "nostr.agent.attestation"]);
+
     return tags;
   }
 }

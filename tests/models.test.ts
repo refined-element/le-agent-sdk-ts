@@ -404,6 +404,88 @@ describe("AgentServiceAgreement", () => {
     const expTags = tags.filter((t) => t[0] === "expiration");
     expect(expTags).toHaveLength(0);
   });
+
+  it("defaults status to proposed", () => {
+    const agr = new AgentServiceAgreement();
+    expect(agr.status).toBe("proposed");
+    const tags = agr.toNostrTags();
+    expect(tags).toContainEqual(["status", "proposed"]);
+  });
+
+  it("includes payment_hash tag when status is completed", () => {
+    const agr = new AgentServiceAgreement({
+      status: "completed",
+      paymentHash: "abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+    });
+    const tags = agr.toNostrTags();
+    expect(tags).toContainEqual(["status", "completed"]);
+    expect(tags).toContainEqual([
+      "payment_hash",
+      "abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+    ]);
+  });
+
+  it("omits payment_hash tag when status is not completed", () => {
+    const agr = new AgentServiceAgreement({
+      status: "active",
+      paymentHash: "abc123def456abc123def456abc123def456abc123def456abc123def456abcd",
+    });
+    const tags = agr.toNostrTags();
+    expect(tags).toContainEqual(["status", "active"]);
+    const phTags = tags.filter((t) => t[0] === "payment_hash");
+    expect(phTags).toHaveLength(0);
+  });
+
+  it("omits payment_hash tag when completed but no hash", () => {
+    const agr = new AgentServiceAgreement({ status: "completed" });
+    const tags = agr.toNostrTags();
+    expect(tags).toContainEqual(["status", "completed"]);
+    const phTags = tags.filter((t) => t[0] === "payment_hash");
+    expect(phTags).toHaveLength(0);
+  });
+
+  it("parses status and payment_hash from Nostr event", () => {
+    const event = {
+      id: "agr_ph",
+      pubkey: "pub",
+      created_at: 1,
+      kind: 38402,
+      content: "",
+      tags: [
+        ["status", "completed"],
+        ["payment_hash", "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"],
+        ["price", "100"],
+      ],
+      sig: "",
+    };
+    const agr = AgentServiceAgreement.fromNostrEvent(event);
+    expect(agr.status).toBe("completed");
+    expect(agr.paymentHash).toBe("ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00");
+  });
+
+  it("roundtrips status and payment_hash for completed agreements", () => {
+    const agr = new AgentServiceAgreement({
+      requestEventId: "req_ph",
+      providerPubkey: "prov_ph",
+      requesterPubkey: "req_pub_ph",
+      agreedPriceSats: 200,
+      status: "completed",
+      paymentHash: "aabb00aabb00aabb00aabb00aabb00aabb00aabb00aabb00aabb00aabb00aabb",
+    });
+    const tags = agr.toNostrTags();
+    const event = {
+      id: "rt_ph",
+      pubkey: "rt_pub",
+      created_at: 1700000010,
+      kind: 38402,
+      content: "",
+      tags,
+      sig: "",
+    };
+    const restored = AgentServiceAgreement.fromNostrEvent(event);
+    expect(restored.status).toBe("completed");
+    expect(restored.paymentHash).toBe(agr.paymentHash);
+  });
 });
 
 // --- AgentAttestation ---
@@ -442,6 +524,10 @@ describe("AgentAttestation", () => {
     expect(tags).toContainEqual(["p", "sub"]);
     expect(tags).toContainEqual(["e", "agr"]);
     expect(tags).toContainEqual(["rating", "4"]);
+    // NIP-32 label tags
+    expect(tags).toContainEqual(["L", "nostr.agent.attestation"]);
+    expect(tags).toContainEqual(["l", "completed", "nostr.agent.attestation"]);
+    expect(tags).toContainEqual(["l", "commerce.service_completion", "nostr.agent.attestation"]);
   });
 
   it("has correct KIND constant", () => {
