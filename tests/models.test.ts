@@ -505,6 +505,29 @@ describe("AgentServiceAgreement", () => {
     expect(restored.status).toBe("completed");
     expect(restored.paymentHash).toBe(agr.paymentHash);
   });
+
+  it("normalizes empty/whitespace status to 'proposed' from Nostr event", () => {
+    const emptyEvent = {
+      id: "agr_empty",
+      pubkey: "pub",
+      created_at: 1,
+      kind: 38402,
+      content: "",
+      tags: [["status", ""], ["price", "100"]],
+      sig: "",
+    };
+    const wsEvent = {
+      id: "agr_ws",
+      pubkey: "pub",
+      created_at: 1,
+      kind: 38402,
+      content: "",
+      tags: [["status", "   "], ["price", "100"]],
+      sig: "",
+    };
+    expect(AgentServiceAgreement.fromNostrEvent(emptyEvent).status).toBe("proposed");
+    expect(AgentServiceAgreement.fromNostrEvent(wsEvent).status).toBe("proposed");
+  });
 });
 
 // --- AgentAttestation ---
