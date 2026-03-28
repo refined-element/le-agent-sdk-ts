@@ -463,6 +463,25 @@ describe("AgentServiceAgreement", () => {
     expect(agr.paymentHash).toBe("ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00");
   });
 
+  it("drops payment_hash when status is not completed (invariant)", () => {
+    const event = {
+      id: "agr_inv",
+      pubkey: "pub",
+      created_at: 1,
+      kind: 38402,
+      content: "",
+      tags: [
+        ["status", "active"],
+        ["payment_hash", "ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00"],
+        ["price", "100"],
+      ],
+      sig: "",
+    };
+    const agr = AgentServiceAgreement.fromNostrEvent(event);
+    expect(agr.status).toBe("active");
+    expect(agr.paymentHash).toBeNull();
+  });
+
   it("roundtrips status and payment_hash for completed agreements", () => {
     const agr = new AgentServiceAgreement({
       requestEventId: "req_ph",

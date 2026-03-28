@@ -142,6 +142,13 @@ export class AgentServiceAgreement {
       if (pTags.length > 1) agr.requesterPubkey = pTags[1][1];
     }
 
+    // Enforce invariant: payment_hash is only meaningful for completed agreements.
+    // Silently drop it for other statuses to prevent data loss on roundtrips
+    // (toNostrTags only emits payment_hash when status === "completed").
+    if (agr.status !== "completed") {
+      agr.paymentHash = null;
+    }
+
     return agr;
   }
 
