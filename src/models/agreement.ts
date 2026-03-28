@@ -100,7 +100,7 @@ export class AgentServiceAgreement {
       } else if (key === "status" && tag.length > 1) {
         agr.status = (tag[1] && tag[1].trim()) || "proposed";
       } else if (key === "payment_hash" && tag.length > 1) {
-        agr.paymentHash = tag[1];
+        agr.paymentHash = typeof tag[1] === "string" ? tag[1] : null;
       }
     }
 
