@@ -59,7 +59,7 @@ export class AgentServiceAgreement {
     this.macaroon = init.macaroon ?? null;
     this.paymentHash = init.paymentHash ?? null;
     this.settlementMode = init.settlementMode ?? "proxy";
-    this.status = init.status ?? "proposed";
+    this.status = (init.status && init.status.trim()) || "proposed";
     this.eventId = init.eventId ?? "";
     this.pubkey = init.pubkey ?? "";
     this.createdAt = init.createdAt ?? 0;
@@ -170,7 +170,7 @@ export class AgentServiceAgreement {
     if (this.terms) tags.push(["terms", this.terms]);
     if (this.expiresAt !== null)
       tags.push(["expiration", String(this.expiresAt)]);
-    if (this.status) tags.push(["status", this.status]);
+    tags.push(["status", this.status]);
     if (this.status === "completed" && this.paymentHash) {
       tags.push(["payment_hash", this.paymentHash]);
     }
