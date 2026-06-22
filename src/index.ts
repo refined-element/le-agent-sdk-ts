@@ -50,3 +50,13 @@ export type {
   DiscoverOptions,
   ReputationResult,
 } from "./agent/manager.js";
+
+export { CapabilityClient, ApprovalRequiredError, protect } from "./capabilities/client.js";
+export type {
+  CapabilityClientOptions,
+  InvokeResult,
+  IssueCredentialOptions,
+  DelegateCredentialOptions,
+  CredentialResult,
+  ProtectOptions,
+} from "./capabilities/client.js";
