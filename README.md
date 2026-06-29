@@ -1,5 +1,8 @@
 # le-agent-sdk
 
+[![Discord](https://img.shields.io/discord/1405389254892195951?label=community&logo=discord&color=5865F2)](https://discord.gg/rX7NxHY8vx)
+
+
 TypeScript SDK for Lightning Enable Agent Service Agreements (ASA).
 
 Discover, negotiate, and settle agent services on Nostr with L402 Lightning payments.
