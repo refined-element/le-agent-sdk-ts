@@ -1,5 +1,5 @@
 /**
- * Lightning Enable Agent SDK -- discover, negotiate, and settle Agent Service Agreements.
+ * Lightning Enable Agent SDK -- discover, request, and settle Agent Service Agreements.
  */
 
 export { AgentCapability, AgentPricing } from "./models/capability.js";

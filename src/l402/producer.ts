@@ -38,7 +38,7 @@ export class L402ProducerClient {
   /**
    * Create an L402 challenge (Lightning invoice + macaroon) for a resource.
    *
-   * The provider calls this to generate an invoice at the negotiated price.
+   * The provider calls this to generate an invoice at the agreed price.
    */
   async createChallenge(
     resource: string,
