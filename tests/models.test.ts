@@ -582,3 +582,55 @@ describe("AgentAttestation", () => {
     expect(att.rating).toBe(0);
   });
 });
+
+// --- AgentPricing: malformed price tags ---
+
+describe("AgentPricing malformed amounts", () => {
+  it("rejects a non-numeric price amount instead of yielding NaN", () => {
+    // parseInt("abc") is NaN, and every NaN comparison is false, so a NaN price
+    // silently passes any budget/affordability check downstream.
+    expect(() => AgentPricing.fromTag(["price", "abc"])).toThrow(
+      /invalid price/i
+    );
+  });
+
+  it("rejects an empty price amount", () => {
+    expect(() => AgentPricing.fromTag(["price", ""])).toThrow(/invalid price/i);
+  });
+
+  it("rejects a price amount with a trailing suffix (parseInt would truncate)", () => {
+    // parseInt("100abc", 10) === 100 -- silently accepting a malformed tag.
+    expect(() => AgentPricing.fromTag(["price", "100abc"])).toThrow(
+      /invalid price/i
+    );
+  });
+
+  it("rejects a non-integer price amount", () => {
+    expect(() => AgentPricing.fromTag(["price", "1.5"])).toThrow(
+      /invalid price/i
+    );
+  });
+
+  it("rejects a capability whose price tag is malformed", () => {
+    expect(() =>
+      AgentCapability.fromNostrEvent({
+        id: "ev1",
+        pubkey: "pub1",
+        created_at: 1,
+        kind: 38400,
+        content: "",
+        tags: [["price", "not-a-number", "sats", "per-request"]],
+      })
+    ).toThrow(/invalid price/i);
+  });
+
+  it("still parses a well-formed price tag", () => {
+    const p = AgentPricing.fromTag(["price", "100", "sats", "per-request"]);
+    expect(p.amount).toBe(100);
+  });
+
+  it("still parses a zero price tag (free service)", () => {
+    const p = AgentPricing.fromTag(["price", "0"]);
+    expect(p.amount).toBe(0);
+  });
+});

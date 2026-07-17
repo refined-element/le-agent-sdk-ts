@@ -643,15 +643,12 @@ describe("L402Client.access() - MPP amount strict validation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("ignores non-strict MPP amount with non-digit suffix (e.g. '10sat')", async () => {
+  it("does not trust a non-strict MPP amount with a non-digit suffix (e.g. '10sat')", async () => {
     const header =
       'Payment method="lightning", invoice="lnbc1rest", amount="10sat"';
     fetchSpy.mockResolvedValueOnce(
       mockResponse(402, { "www-authenticate": header })
     );
-    // Non-strict amount "10sat" should be ignored; falls back to BOLT-11 decode.
-    // lnbc1rest has no valid amount, so maxAmountSats check is skipped.
-    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
 
     const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
     const client = new L402Client({
@@ -659,19 +656,21 @@ describe("L402Client.access() - MPP amount strict validation", () => {
       maxAmountSats: 5,
     });
 
-    // Should NOT throw because the malformed amount is ignored (falls back to BOLT-11
-    // which returns undefined for "lnbc1rest", so no amount to enforce)
-    const res = await client.access("https://example.com/resource");
-    expect(res.status).toBe(200);
+    // The malformed amount "10sat" is not trusted, so we fall back to BOLT-11
+    // decode; "lnbc1rest" encodes no amount either. With a budget configured, an
+    // amount that cannot be determined is refused rather than paid.
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
   });
 
-  it("ignores non-decimal MPP amount with hex prefix (e.g. '0x10')", async () => {
+  it("does not trust a non-decimal MPP amount with a hex prefix (e.g. '0x10')", async () => {
     const header =
       'Payment method="lightning", invoice="lnbc1rest", amount="0x10"';
     fetchSpy.mockResolvedValueOnce(
       mockResponse(402, { "www-authenticate": header })
     );
-    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
 
     const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
     const client = new L402Client({
@@ -679,9 +678,12 @@ describe("L402Client.access() - MPP amount strict validation", () => {
       maxAmountSats: 5,
     });
 
-    // "0x10" fails /^[0-9]+$/ test, so it's ignored
-    const res = await client.access("https://example.com/resource");
-    expect(res.status).toBe(200);
+    // "0x10" fails the /^[0-9]+$/ test and is never interpreted as 16, so no
+    // amount can be determined and the payment is refused.
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
   });
 
   it("enforces maxAmountSats with valid strict MPP amount", async () => {
@@ -783,5 +785,112 @@ describe("L402Client.payAndAccess() - maxAmountSats enforcement", () => {
       client.payAndAccess("https://example.com/resource", payCallback)
     ).rejects.toThrow(/exceeds maximum/);
     expect(payCallback).not.toHaveBeenCalled();
+  });
+});
+
+describe("L402Client - unknown invoice amount is refused when a budget applies", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  // An amountless BOLT-11 invoice ("lnbc1...") lets the payee claim any amount.
+  // decodeInvoiceAmountSats() cannot parse an amount, and an unparseable amount
+  // must never be read as "no limit applies".
+  const NO_AMOUNT_L402_HEADER =
+    'L402 macaroon="testmac123", invoice="lnbc1amountlessinvoice"';
+
+  it("refuses an amountless BOLT-11 invoice instead of paying it (access)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": NO_AMOUNT_L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 100,
+    });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("refuses an amountless BOLT-11 invoice instead of paying it (payAndAccess)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": NO_AMOUNT_L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ maxAmountSats: 100 });
+
+    await expect(
+      client.payAndAccess("https://example.com/resource", payCallback)
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("refuses an invoice whose amount cannot be decoded (garbled invoice)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, {
+        "www-authenticate": 'L402 macaroon="m", invoice="not-a-bolt11-invoice"',
+      })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 100,
+    });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("refuses a zero-amount invoice when a budget applies", async () => {
+    // MPP amount="0" is an explicit "you decide" — same hazard as no amount.
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, {
+        "www-authenticate":
+          'Payment method="lightning", invoice="lnbc1rest", amount="0"',
+      })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({
+      payInvoiceCallback: payCallback,
+      maxAmountSats: 100,
+    });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("still pays an amountless invoice when no budget is configured (opt-out)", async () => {
+    // With no maxAmountSats there is no limit to bypass; the caller has
+    // explicitly opted out of budget enforcement.
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": NO_AMOUNT_L402_HEADER })
+    );
+    fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    const res = await client.access("https://example.com/resource");
+    expect(res.status).toBe(200);
+    expect(payCallback).toHaveBeenCalled();
   });
 });

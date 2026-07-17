@@ -142,6 +142,43 @@ if (reputation.count === 0) {
 
 `getReputation` returns a `ReputationResult`: `{ average, count, attestations }`.
 
+## Capability Credentials: Invoke, Delegate, and Protect
+
+Pay for a capability, and delegate strictly narrower paid tasks to subagents. Backed by Lightning Enable; macaroon attenuation guarantees a delegated credential can only restrict authority, never widen it.
+
+> Distinct from `AgentCapability` above. That advertises a service on Nostr (kind 38400). A capability credential is a Lightning Enable macaroon that authorizes and delegates paid calls over HTTP. The two are independent — you can use either on its own.
+
+```typescript
+import { CapabilityClient, protect } from "le-agent-sdk";
+
+// --- Consumer: invoke a paid capability (handles 402 -> pay -> retry) ---
+const client = new CapabilityClient({
+  apiKey: process.env.LE_API_KEY!,
+  payInvoice: async (invoice) => myWallet.pay(invoice), // returns hex preimage
+});
+
+const result = await client.invoke("company.enrich", agentId, { domain: "example.com" });
+
+// --- Delegate a narrower credential to a subagent ---
+const root = await client.issue({ principalId: "research-agent", capability: "research:read", delegationDepth: 2 });
+const sub = await client.delegate({
+  parentCredentialId: root.credentialId,
+  parentMacaroon: root.macaroon,
+  to: "filing-subagent",
+  maxSpendSats: 300,
+  expiresInSeconds: 600,
+  purpose: "parse latest 10-K",
+});
+
+// --- Provider: require an L402 payment on your own endpoint ---
+export const POST = protect({
+  apiKey: process.env.LE_API_KEY!,
+  capability: "company.enrich",
+  priceSats: 100,
+  handler: async (input) => enrichCompany(input.domain),
+});
+```
+
 ## API Reference
 
 ### Core Classes
@@ -186,6 +223,23 @@ if (reputation.count === 0) {
 | `L402ProducerClient` | Client for the Lightning Enable producer API: create L402 challenges and verify payments. Requires a Lightning Enable API key. |
 | `AgentPricing` | Pricing model (`amount`, `unit`, `model` such as per-request/per-token). |
 | `parseL402Challenge`, `validatePreimage`, `decodeInvoiceAmountSats` | Helpers for working with L402 challenges and invoices. |
+
+### Capability Layer
+
+| Export | Description |
+|--------|-------------|
+| `CapabilityClient` | Invoke paid capabilities (402 → pay → retry) and issue, delegate, or revoke macaroon capability credentials. Requires a Lightning Enable API key. |
+| `protect` | Wrap your own handler so it requires an L402 payment before running. |
+| `ApprovalRequiredError` | Thrown when an invocation needs out-of-band approval before it can proceed. |
+
+### `CapabilityClient` Methods
+
+| Method | Description |
+|--------|-------------|
+| `invoke(slug, agentId, input?)` | Call a paid capability, settling any L402 challenge via `payInvoice`. Returns an `InvokeResult`. |
+| `issue(options)` | Issue a root capability credential for a principal. Returns a `CredentialResult`. |
+| `delegate(options)` | Derive a strictly narrower credential from a parent macaroon. Returns a `CredentialResult`. |
+| `revoke(credentialId)` | Revoke a previously issued credential. |
 
 ## Protocol
 
