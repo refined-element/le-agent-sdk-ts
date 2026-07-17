@@ -116,7 +116,39 @@ export class AgentManager {
     }
   }
 
-  /** Query all configured relays and merge/deduplicate results. */
+  /**
+   * Verify a raw relay event's ID and signature.
+   *
+   * Relay lists are caller-configurable and results from every relay are merged,
+   * so a single hostile or compromised relay could otherwise inject events
+   * attributed to any pubkey. Anything that does not carry a valid BIP-340
+   * signature over its own ID is not authentic and must be discarded.
+   */
+  static async isAuthentic(raw: Record<string, unknown>): Promise<boolean> {
+    if (
+      typeof raw.id !== "string" ||
+      typeof raw.pubkey !== "string" ||
+      typeof raw.created_at !== "number" ||
+      typeof raw.kind !== "number" ||
+      typeof raw.content !== "string" ||
+      typeof raw.sig !== "string" ||
+      !Array.isArray(raw.tags)
+    ) {
+      return false;
+    }
+
+    try {
+      return await NostrEvent.verify(raw as unknown as NostrEventData);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Query all configured relays and merge/deduplicate results.
+   *
+   * Events that fail signature verification are discarded rather than returned.
+   */
   async queryRelays(
     filters: Record<string, unknown>[],
     timeout = 5_000
@@ -135,7 +167,9 @@ export class AgentManager {
           const eventId = event.id as string;
           if (eventId && !seenIds.has(eventId)) {
             seenIds.add(eventId);
-            events.push(event);
+            if (await AgentManager.isAuthentic(event)) {
+              events.push(event);
+            }
           }
         }
       }
@@ -279,7 +313,11 @@ export class AgentManager {
               if (eventId && !seenIds.has(eventId)) {
                 seenIds.add(eventId);
                 reconnectAttempts = 0;
-                yield AgentServiceRequest.fromNostrEvent(msg.event);
+                // Drop events a relay cannot prove were signed by their
+                // claimed author before acting on them.
+                if (await AgentManager.isAuthentic(msg.event)) {
+                  yield AgentServiceRequest.fromNostrEvent(msg.event);
+                }
               }
             }
           }
@@ -514,6 +552,11 @@ export class AgentManager {
 
   /**
    * Query relays for reputation attestations about a given pubkey.
+   *
+   * Only attestations carrying a rating within the valid 1-5 range are counted.
+   * publishAttestation() enforces that range locally, but nothing stops a hostile
+   * agent from putting any integer on the wire, and a single out-of-range rating
+   * would otherwise skew the average arbitrarily.
    */
   async getReputation(pubkey: string): Promise<ReputationResult> {
     const nostrFilter = TagParser.buildFilter({
@@ -522,9 +565,9 @@ export class AgentManager {
     });
 
     const rawEvents = await this.queryRelays([nostrFilter]);
-    const attestations = rawEvents.map((e) =>
-      AgentAttestation.fromNostrEvent(e)
-    );
+    const attestations = rawEvents
+      .map((e) => AgentAttestation.fromNostrEvent(e))
+      .filter((a) => a.rating >= 1 && a.rating <= 5);
 
     if (attestations.length === 0) {
       return { average: 0, count: 0, attestations: [] };

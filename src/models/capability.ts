@@ -31,8 +31,23 @@ export class AgentPricing {
     if (tag.length < 2) {
       throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
     }
+
+    // Reject anything that is not a plain integer. parseInt() would return NaN
+    // for "abc" and silently truncate "100abc" to 100; a NaN amount is worse
+    // than useless because every comparison against it is false, so a malformed
+    // price would pass any budget check downstream instead of being rejected.
+    const rawAmount = tag[1];
+    if (!/^-?[0-9]+$/.test(rawAmount)) {
+      throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
+    }
+
+    const amount = Number(rawAmount);
+    if (!Number.isSafeInteger(amount)) {
+      throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
+    }
+
     return new AgentPricing({
-      amount: parseInt(tag[1], 10),
+      amount,
       unit: tag.length > 2 ? tag[2] : "sats",
       model: tag.length > 3 ? tag[3] : "per-request",
     });

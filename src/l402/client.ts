@@ -250,7 +250,9 @@ export class L402Client {
     payFn: PayInvoiceCallback,
     effectiveMax: number | undefined
   ): Promise<string> {
-    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount)
+    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount).
+    // When a limit applies, an amount we cannot determine is refused rather than
+    // paid: an unknown amount must never be read as "no limit applies".
     if (effectiveMax !== undefined) {
       let amountSats: number | undefined;
 
@@ -278,7 +280,20 @@ export class L402Client {
         amountSats = decodeInvoiceAmountSats(challenge.invoice);
       }
 
-      if (amountSats !== undefined && amountSats > effectiveMax) {
+      // Reject no-amount invoices (security: could bypass budget checks).
+      // decodeInvoiceAmountSats() returns undefined both for invoices that
+      // encode no amount and for invoices we failed to parse; neither can be
+      // checked against the budget, so both are refused. A zero amount is an
+      // explicit "payer decides" and carries the same risk.
+      if (amountSats === undefined || amountSats <= 0) {
+        throw new Error(
+          `Invoice has no amount specified. For security, only invoices with ` +
+            `explicit amounts are supported when a maximum (${effectiveMax} sats) ` +
+            `is configured. Invoice: ${challenge.invoice.substring(0, 40)}...`
+        );
+      }
+
+      if (amountSats > effectiveMax) {
         throw new Error(
           `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
             `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
