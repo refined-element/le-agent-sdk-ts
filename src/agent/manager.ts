@@ -216,7 +216,28 @@ export class AgentManager {
     });
 
     const rawEvents = await this.queryRelays([nostrFilter], timeout);
-    return rawEvents.map((e) => AgentCapability.fromNostrEvent(e));
+
+    // Parse each event independently. A malformed tag (e.g. a non-integer
+    // "price" amount) makes AgentCapability.fromNostrEvent throw; if that
+    // propagated out of a .map() over the batch, one hostile relay publishing
+    // one bad capability event would abort the whole discover() and drop every
+    // valid capability with it. Fail closed, LOUDLY: skip the offending event
+    // and warn (naming its id) rather than silently swallowing it.
+    const capabilities: AgentCapability[] = [];
+    for (const event of rawEvents) {
+      try {
+        capabilities.push(AgentCapability.fromNostrEvent(event));
+      } catch (err) {
+        const eventId =
+          typeof event.id === "string" && event.id ? event.id : "<unknown>";
+        console.warn(
+          `discover(): skipping malformed capability event ${eventId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+    }
+    return capabilities;
   }
 
   /**

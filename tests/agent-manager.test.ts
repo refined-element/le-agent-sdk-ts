@@ -84,6 +84,60 @@ describe("AgentManager discover", () => {
     const callArgs = spy.mock.calls[0][0];
     expect(callArgs[0]["#t"]).toEqual(["ml", "vision"]);
   });
+
+  it("skips a single malformed-price event without aborting the batch", async () => {
+    // Ledger #41 DoS vector: one hostile relay publishing one capability event
+    // with an unparseable price tag must not take down discovery for everyone.
+    // The batch must parse each event independently, drop the bad one, LOUDLY
+    // (warn), and still return every valid capability.
+    const events = [
+      {
+        id: "good-1",
+        pubkey: "pub1",
+        created_at: 1700000000,
+        kind: 38400,
+        content: "Service A",
+        tags: [["d", "svc-a"], ["price", "100", "sats", "per-request"]],
+        sig: "",
+      },
+      {
+        id: "poison",
+        pubkey: "pub-evil",
+        created_at: 1700000001,
+        kind: 38400,
+        content: "Poison service",
+        tags: [["d", "svc-poison"], ["price", "abc"]],
+        sig: "",
+      },
+      {
+        id: "good-2",
+        pubkey: "pub2",
+        created_at: 1700000002,
+        kind: 38400,
+        content: "Service B",
+        tags: [["d", "svc-b"], ["price", "200", "sats", "per-request"]],
+        sig: "",
+      },
+    ];
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const mgr = new AgentManager();
+      vi.spyOn(mgr, "queryRelays").mockResolvedValue(events);
+
+      const caps = await mgr.discover();
+
+      // The malformed event is skipped; both valid capabilities survive.
+      expect(caps).toHaveLength(2);
+      expect(caps.map((c) => c.serviceId)).toEqual(["svc-a", "svc-b"]);
+
+      // Fail closed, LOUDLY: the skip is warned and names the offending event id.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0].join(" ")).toContain("poison");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("AgentManager settle", () => {
