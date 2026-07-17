@@ -52,7 +52,7 @@ async function main() {
   const chosen = capabilities[0];
   console.log(`Using service: ${chosen.serviceId}`);
 
-  // Option A: Direct L402 settlement (skip negotiation)
+  // Option A: Direct L402 settlement (skip the request/agreement steps)
   if (chosen.l402Endpoint) {
     console.log(`Settling via L402 at ${chosen.l402Endpoint}`);
     try {
@@ -64,7 +64,7 @@ async function main() {
       console.log("(Configure payInvoiceCallback for auto-payment)");
     }
   } else {
-    // Option B: Send a service request for negotiation
+    // Option B: Send a service request and wait for an agreement
     console.log("No L402 endpoint; sending service request...");
     const request = await manager.requestService(
       chosen.eventId,

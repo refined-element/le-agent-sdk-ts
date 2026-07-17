@@ -2,7 +2,7 @@
  * Agent Manager -- main orchestrator for ASA protocol operations.
  *
  * Provides a high-level API for discovering capabilities, publishing services,
- * sending requests, negotiating agreements, and settling via L402.
+ * sending requests, publishing agreements, and settling via L402.
  */
 
 import { L402Client, type PayInvoiceCallback } from "../l402/client.js";
@@ -426,7 +426,7 @@ export class AgentManager {
   }
 
   /**
-   * Directly settle via a capability's L402 endpoint (skip negotiation).
+   * Directly settle via a capability's L402 endpoint (skip the request/agreement steps).
    */
   async settleViaL402(
     capability: AgentCapability,
