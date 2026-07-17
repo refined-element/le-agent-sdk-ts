@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.3
+
+- **Packaging fix — 0.3.1 and 0.3.2 were not importable.** The published npm tarball was missing the compiled `dist/` output: `dist/` is git-ignored and the package declared no `files` allowlist, so `npm publish` (which falls back to `.gitignore`) stripped the build output even though CI built it, leaving `main`/`module`/`exports` pointing at files that were never shipped. Any `import`/`require` failed with `MODULE_NOT_FOUND`. Adds `"files": ["dist"]` so the compiled output is always included (and `src`/`tests` are no longer shipped). No API changes — 0.3.3 is the first npm-importable release carrying the 0.3.2 fixes.
+
 ## 0.3.2
 
 - Fixes budget limits being skipped for invoices with no parseable amount, relay events being accepted without signature verification, out-of-range ratings skewing reputation averages, and malformed price tags parsing as NaN — upgrade recommended.

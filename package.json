@@ -1,6 +1,6 @@
 {
   "name": "le-agent-sdk",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "TypeScript SDK for Lightning Enable Agent Service Agreements",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -13,6 +13,9 @@
       "require": "./dist/index.cjs"
     }
   },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
