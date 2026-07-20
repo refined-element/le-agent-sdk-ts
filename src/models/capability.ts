@@ -4,6 +4,29 @@
  * Addressable/replaceable event (NIP-33 style) keyed by `d` tag (serviceId).
  */
 
+/**
+ * Parse a satoshi amount that must be a plain integer, or throw.
+ *
+ * parseInt() is unsafe for untrusted tag values: parseInt("abc") is NaN and
+ * every comparison against NaN is false, so a NaN amount silently passes any
+ * budget / price-floor check downstream; parseInt("10.5") / parseInt("100abc")
+ * silently truncate to 10 / 100. Both are worse than useless, so anything that
+ * is not a plain integer is rejected. Shared by BOTH price-tag and
+ * negotiable-floor parsing so the two can never drift apart again (ledger #41 /
+ * #61; pinned by the shared conformance vectors price-tag.json /
+ * negotiable-floor.json).
+ */
+function parseSatsAmount(raw: string, context: string): number {
+  if (!/^-?[0-9]+$/.test(raw)) {
+    throw new Error(`Invalid ${context}`);
+  }
+  const amount = Number(raw);
+  if (!Number.isSafeInteger(amount)) {
+    throw new Error(`Invalid ${context}`);
+  }
+  return amount;
+}
+
 export interface AgentPricingInit {
   amount: number;
   unit?: string;
@@ -32,22 +55,11 @@ export class AgentPricing {
       throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
     }
 
-    // Reject anything that is not a plain integer. parseInt() would return NaN
-    // for "abc" and silently truncate "100abc" to 100; a NaN amount is worse
-    // than useless because every comparison against it is false, so a malformed
-    // price would pass any budget check downstream instead of being rejected.
-    const rawAmount = tag[1];
-    if (!/^-?[0-9]+$/.test(rawAmount)) {
-      throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
-    }
-
-    const amount = Number(rawAmount);
-    if (!Number.isSafeInteger(amount)) {
-      throw new Error(`Invalid price tag: ${JSON.stringify(tag)}`);
-    }
-
+    // Reject anything that is not a plain integer (see parseSatsAmount): a NaN or
+    // silently-truncated amount would pass any budget check downstream instead of
+    // being rejected. Shared with the negotiable-floor parse below.
     return new AgentPricing({
-      amount,
+      amount: parseSatsAmount(tag[1], `price tag: ${JSON.stringify(tag)}`),
       unit: tag.length > 2 ? tag[2] : "sats",
       model: tag.length > 3 ? tag[3] : "per-request",
     });
@@ -142,7 +154,14 @@ export class AgentCapability {
           cap.negotiable = true;
         } else if (tag[1] === "floor" && tag.length > 2) {
           cap.negotiable = true;
-          cap.minPriceSats = parseInt(tag[2], 10);
+          // Same strict integer parse as price amounts (ledger #61). parseInt()
+          // kept a NaN floor for "abc" and truncated "10.5"->10 / "100abc"->100,
+          // and a bogus/NaN floor then slips past every downstream price-floor
+          // comparison. python and .NET already reject a malformed floor.
+          cap.minPriceSats = parseSatsAmount(
+            tag[2],
+            `negotiable floor: ${JSON.stringify(tag[2])}`
+          );
         }
       }
     }
