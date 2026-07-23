@@ -147,27 +147,57 @@ export interface L402ClientOptions {
 }
 
 /**
+ * BOLT-11 human-readable part (HRP): "ln" + currency prefix + optional amount
+ * + optional multiplier, anchored end-to-end with `$` so a digit run inside the
+ * bech32 DATA part can never be mistaken for the amount. Longer currency
+ * prefixes precede their own prefixes because JS alternation is ordered.
+ */
+const BOLT11_HRP_RE = /^ln(?:bcrt|bc|tbs|tb|sb)(\d+)?([munp])?$/;
+
+/** BOLT-11 amount multipliers as a fraction of 1 BTC. */
+const BTC_MULTIPLIERS: Record<string, number> = {
+  m: 1e-3,
+  u: 1e-6,
+  n: 1e-9,
+  p: 1e-12,
+};
+
+/**
  * Decode the amount in satoshis from a BOLT-11 invoice string.
- * Returns undefined if the amount cannot be parsed.
+ *
+ * The amount is read ONLY from the human-readable part — everything before the
+ * final bech32 separator ("1"). Per BIP-173 the data charset excludes "1", so
+ * the LAST "1" is the true separator and every earlier "1" belongs to the HRP.
+ * The old `^ln\w+?(\d+)([munp])1` regex was lazy and scanned forward into the
+ * data part, so a crafted invoice such as `lnbc1p5u1foo` (whose real HRP,
+ * "lnbc1p5u", encodes no valid amount) surfaced a bogus positive 500 sats from
+ * its data part — that fabricated amount then slipped past the #71 budget guard
+ * (a fail-open / decoder-disagreement attack, ledger #74).
+ *
+ * Returns undefined when the invoice encodes no amount or cannot be parsed.
+ * undefined means "amount unknown", never "no limit"; a budget-enforcing caller
+ * must refuse it.
  */
 export function decodeInvoiceAmountSats(invoice: string): number | undefined {
-  let inv = invoice.toLowerCase();
+  let inv = invoice.toLowerCase().trim();
   if (inv.startsWith("lightning:")) inv = inv.substring(10);
 
-  const match = /^ln\w+?(\d+)([munp])1/.exec(inv);
+  // Isolate the HRP: everything before the LAST "1" (the bech32 separator).
+  const separator = inv.lastIndexOf("1");
+  if (separator < 0) return undefined;
+  const hrp = inv.substring(0, separator);
+
+  const match = hrp.match(BOLT11_HRP_RE);
   if (!match) return undefined;
 
-  const amountNum = parseInt(match[1], 10);
+  const amountDigits = match[1];
+  if (!amountDigits) return undefined; // amountless invoice: payer chooses => unknown
+
+  const amountNum = parseInt(amountDigits, 10);
   const multiplier = match[2];
 
-  const btcMultipliers: Record<string, number> = {
-    m: 1e-3,
-    u: 1e-6,
-    n: 1e-9,
-    p: 1e-12,
-  };
-
-  const btcAmount = amountNum * btcMultipliers[multiplier];
+  // An absent multiplier means the amount is denominated in whole BTC.
+  const btcAmount = amountNum * (multiplier ? BTC_MULTIPLIERS[multiplier] : 1);
   return Math.round(btcAmount * 1e8);
 }
 
