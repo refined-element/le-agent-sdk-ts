@@ -5,19 +5,22 @@
  */
 
 /**
- * Parse a satoshi amount that must be a plain integer, or throw.
+ * Parse a satoshi amount that must be a NON-NEGATIVE plain integer, or throw.
  *
  * parseInt() is unsafe for untrusted tag values: parseInt("abc") is NaN and
  * every comparison against NaN is false, so a NaN amount silently passes any
  * budget / price-floor check downstream; parseInt("10.5") / parseInt("100abc")
  * silently truncate to 10 / 100. Both are worse than useless, so anything that
- * is not a plain integer is rejected. Shared by BOTH price-tag and
- * negotiable-floor parsing so the two can never drift apart again (ledger #41 /
- * #61; pinned by the shared conformance vectors price-tag.json /
- * negotiable-floor.json).
+ * is not a plain integer is rejected. A negative amount is rejected too
+ * (ledger #69): a negative advertised price/floor is never meaningful and
+ * accepting it is a fail-open smell, so the `^[0-9]+$` pattern (no leading `-`)
+ * rejects it on the same throw path as any other malformed amount. Zero is
+ * valid (a free service). Shared by BOTH price-tag and negotiable-floor parsing
+ * so the two can never drift apart again (ledger #41 / #61 / #69; pinned by the
+ * shared conformance vectors price-tag.json / negotiable-floor.json).
  */
 function parseSatsAmount(raw: string, context: string): number {
-  if (!/^-?[0-9]+$/.test(raw)) {
+  if (!/^[0-9]+$/.test(raw)) {
     throw new Error(`Invalid ${context}`);
   }
   const amount = Number(raw);
