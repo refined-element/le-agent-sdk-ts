@@ -98,6 +98,41 @@ describe("decodeInvoiceAmountSats", () => {
     // lntb = testnet
     expect(decodeInvoiceAmountSats("lntb500u1rest")).toBe(50000);
   });
+
+  // --- ledger #74: HRP-anchored amount parsing (decoder-disagreement fix) ---
+
+  it("refuses a crafted invoice whose bogus amount lives in the data part (#74)", () => {
+    // The bech32 separator is the LAST "1", so the real HRP is "lnbc1p5u",
+    // which encodes NO valid amount. The old lazy `^ln\w+?(\d+)([munp])1`
+    // regex scanned forward into the data part and reported a fabricated
+    // 500 sats. It must now be undefined so the #71 budget guard refuses it.
+    expect(decodeInvoiceAmountSats("lnbc1p5u1foo")).toBeUndefined();
+  });
+
+  it("refuses a crafted testnet invoice with a data-part amount (#74)", () => {
+    // HRP is "lntb1p2u" (fails the anchored grammar); the "2u1" the old regex
+    // latched onto lives past the separator, in the data part.
+    expect(decodeInvoiceAmountSats("lntb1p2u1zzz")).toBeUndefined();
+  });
+
+  it("returns undefined for a genuine amountless invoice", () => {
+    // Real amountless invoices carry no "1" in the data part, so the HRP is
+    // exactly "lnbc" and encodes no amount.
+    expect(decodeInvoiceAmountSats("lnbc1pdatapartnodigits")).toBeUndefined();
+  });
+
+  it("decodes micro-BTC (10u = 1,000 sats)", () => {
+    expect(decodeInvoiceAmountSats("lnbc10u1rest")).toBe(1000);
+  });
+
+  it("decodes nano-BTC (2500n = 250 sats)", () => {
+    expect(decodeInvoiceAmountSats("lnbc2500n1rest")).toBe(250);
+  });
+
+  it("decodes a whole-BTC amount with no multiplier (2 BTC)", () => {
+    // "lnbc2" + separator "1" + data => 2 BTC = 200,000,000 sats.
+    expect(decodeInvoiceAmountSats("lnbc21rest")).toBe(200000000);
+  });
 });
 
 describe("validatePreimage", () => {
@@ -706,6 +741,40 @@ describe("L402Client.access() - MPP amount strict validation", () => {
   });
 });
 
+describe("L402Client - ledger #74 HRP-anchored amount (decoder disagreement)", () => {
+  let fetchSpy: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("refuses a crafted data-part invoice even with NO max configured", async () => {
+    // The L402 challenge carries a crafted invoice whose only "amount" hides in
+    // the bech32 data part. Pre-fix it decoded to a bogus positive 500 sats,
+    // slipped past the #71 positive-amount guard, and the wallet callback was
+    // handed a fabricated budget (fail-open). It must now be refused outright.
+    const header = 'L402 macaroon="mac", invoice="lnbc1p5u1foo"';
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": header })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    // Deliberately NO maxAmountSats: the fail-open must close regardless.
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+});
+
 describe("L402Client.payAndAccess() - maxAmountSats enforcement", () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
@@ -878,11 +947,31 @@ describe("L402Client - unknown invoice amount is refused when a budget applies",
     expect(payCallback).not.toHaveBeenCalled();
   });
 
-  it("still pays an amountless invoice when no budget is configured (opt-out)", async () => {
-    // With no maxAmountSats there is no limit to bypass; the caller has
-    // explicitly opted out of budget enforcement.
+  it("refuses an amountless invoice even when no budget is configured (ledger #71)", async () => {
+    // Fail-closed core of #71: an amount that cannot be bounded is refused
+    // whether or not a ceiling is set. Previously this PAID — with no
+    // maxAmountSats the gate short-circuited and handed ANY invoice to the
+    // wallet, so a caller who forgot to set a ceiling opted into unbounded spend.
     fetchSpy.mockResolvedValueOnce(
       mockResponse(402, { "www-authenticate": NO_AMOUNT_L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("still pays a KNOWN amount when no budget is configured (opt-out preserved)", async () => {
+    // The other half of #71: the fail-closed fix must not force every payment
+    // to declare a max. lnbc100u1rest is a determinable 10,000-sat invoice;
+    // with no ceiling the caller has opted out of a limit for a known amount,
+    // so it is paid.
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
     );
     fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
 
@@ -891,6 +980,6 @@ describe("L402Client - unknown invoice amount is refused when a budget applies",
 
     const res = await client.access("https://example.com/resource");
     expect(res.status).toBe(200);
-    expect(payCallback).toHaveBeenCalled();
+    expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
   });
 });

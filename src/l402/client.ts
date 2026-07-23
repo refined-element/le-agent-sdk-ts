@@ -147,27 +147,57 @@ export interface L402ClientOptions {
 }
 
 /**
+ * BOLT-11 human-readable part (HRP): "ln" + currency prefix + optional amount
+ * + optional multiplier, anchored end-to-end with `$` so a digit run inside the
+ * bech32 DATA part can never be mistaken for the amount. Longer currency
+ * prefixes precede their own prefixes because JS alternation is ordered.
+ */
+const BOLT11_HRP_RE = /^ln(?:bcrt|bc|tbs|tb|sb)(\d+)?([munp])?$/;
+
+/** BOLT-11 amount multipliers as a fraction of 1 BTC. */
+const BTC_MULTIPLIERS: Record<string, number> = {
+  m: 1e-3,
+  u: 1e-6,
+  n: 1e-9,
+  p: 1e-12,
+};
+
+/**
  * Decode the amount in satoshis from a BOLT-11 invoice string.
- * Returns undefined if the amount cannot be parsed.
+ *
+ * The amount is read ONLY from the human-readable part — everything before the
+ * final bech32 separator ("1"). Per BIP-173 the data charset excludes "1", so
+ * the LAST "1" is the true separator and every earlier "1" belongs to the HRP.
+ * The old `^ln\w+?(\d+)([munp])1` regex was lazy and scanned forward into the
+ * data part, so a crafted invoice such as `lnbc1p5u1foo` (whose real HRP,
+ * "lnbc1p5u", encodes no valid amount) surfaced a bogus positive 500 sats from
+ * its data part — that fabricated amount then slipped past the #71 budget guard
+ * (a fail-open / decoder-disagreement attack, ledger #74).
+ *
+ * Returns undefined when the invoice encodes no amount or cannot be parsed.
+ * undefined means "amount unknown", never "no limit"; a budget-enforcing caller
+ * must refuse it.
  */
 export function decodeInvoiceAmountSats(invoice: string): number | undefined {
-  let inv = invoice.toLowerCase();
+  let inv = invoice.toLowerCase().trim();
   if (inv.startsWith("lightning:")) inv = inv.substring(10);
 
-  const match = /^ln\w+?(\d+)([munp])1/.exec(inv);
+  // Isolate the HRP: everything before the LAST "1" (the bech32 separator).
+  const separator = inv.lastIndexOf("1");
+  if (separator < 0) return undefined;
+  const hrp = inv.substring(0, separator);
+
+  const match = hrp.match(BOLT11_HRP_RE);
   if (!match) return undefined;
 
-  const amountNum = parseInt(match[1], 10);
+  const amountDigits = match[1];
+  if (!amountDigits) return undefined; // amountless invoice: payer chooses => unknown
+
+  const amountNum = parseInt(amountDigits, 10);
   const multiplier = match[2];
 
-  const btcMultipliers: Record<string, number> = {
-    m: 1e-3,
-    u: 1e-6,
-    n: 1e-9,
-    p: 1e-12,
-  };
-
-  const btcAmount = amountNum * btcMultipliers[multiplier];
+  // An absent multiplier means the amount is denominated in whole BTC.
+  const btcAmount = amountNum * (multiplier ? BTC_MULTIPLIERS[multiplier] : 1);
   return Math.round(btcAmount * 1e8);
 }
 
@@ -250,55 +280,60 @@ export class L402Client {
     payFn: PayInvoiceCallback,
     effectiveMax: number | undefined
   ): Promise<string> {
-    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount).
-    // When a limit applies, an amount we cannot determine is refused rather than
-    // paid: an unknown amount must never be read as "no limit applies".
-    if (effectiveMax !== undefined) {
-      let amountSats: number | undefined;
+    // Determine the invoice amount in sats (MPP explicit amount, else BOLT-11
+    // decode). This runs REGARDLESS of whether a ceiling is configured — the
+    // fail-closed rules below are split into two independent checks (ledger #71).
+    let amountSats: number | undefined;
 
-      // For MPP challenges with an explicit amount field, use it directly.
-      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
-      if (!("macaroon" in challenge)) {
-        const mppAmount = (challenge as MppChallenge).amount;
-        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
-          const parsed = Number(mppAmount);
-          if (
-            !Number.isFinite(parsed) ||
-            !Number.isSafeInteger(parsed) ||
-            parsed < 0
-          ) {
-            throw new Error(
-              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
-            );
-          }
-          amountSats = parsed;
+    // For MPP challenges with an explicit amount field, use it directly.
+    // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+    if (!("macaroon" in challenge)) {
+      const mppAmount = (challenge as MppChallenge).amount;
+      if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+        const parsed = Number(mppAmount);
+        if (
+          !Number.isFinite(parsed) ||
+          !Number.isSafeInteger(parsed) ||
+          parsed < 0
+        ) {
+          throw new Error(
+            `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+          );
         }
+        amountSats = parsed;
       }
+    }
 
-      // Fall back to BOLT-11 invoice decoding
-      if (amountSats === undefined) {
-        amountSats = decodeInvoiceAmountSats(challenge.invoice);
-      }
+    // Fall back to BOLT-11 invoice decoding
+    if (amountSats === undefined) {
+      amountSats = decodeInvoiceAmountSats(challenge.invoice);
+    }
 
-      // Reject no-amount invoices (security: could bypass budget checks).
-      // decodeInvoiceAmountSats() returns undefined both for invoices that
-      // encode no amount and for invoices we failed to parse; neither can be
-      // checked against the budget, so both are refused. A zero amount is an
-      // explicit "payer decides" and carries the same risk.
-      if (amountSats === undefined || amountSats <= 0) {
-        throw new Error(
-          `Invoice has no amount specified. For security, only invoices with ` +
-            `explicit amounts are supported when a maximum (${effectiveMax} sats) ` +
-            `is configured. Invoice: ${challenge.invoice.substring(0, 40)}...`
-        );
-      }
+    // Rule 1 (fail-closed core, ledger #71): an unknown/unbounded amount is
+    // ALWAYS refused, whether or not a ceiling is configured. Previously this
+    // check lived inside `if (effectiveMax !== undefined)`, so with no max the
+    // gate paid ANY invoice — a caller who forgot to set a ceiling delegated an
+    // unbounded, unaudited spend. decodeInvoiceAmountSats() returns undefined
+    // both for invoices that encode no amount and for invoices we failed to
+    // parse; a zero amount is an explicit "payer decides". None can be proven
+    // bounded, so all are refused even when no maximum is set.
+    if (amountSats === undefined || amountSats <= 0) {
+      throw new Error(
+        `Invoice has no amount specified (amountless, unparseable, or zero), so ` +
+          `it cannot be bounded and is refused — even when no maximum is ` +
+          `configured. Paying it would hand the wallet an unbounded amount. ` +
+          `Invoice: ${challenge.invoice.substring(0, 40)}...`
+      );
+    }
 
-      if (amountSats > effectiveMax) {
-        throw new Error(
-          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
-            `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
-        );
-      }
+    // Rule 2: compare against the ceiling only when one is configured. With no
+    // max the caller has opted out of a limit for this KNOWN amount, which is
+    // their choice; the unknown-amount hole above is closed regardless.
+    if (effectiveMax !== undefined && amountSats > effectiveMax) {
+      throw new Error(
+        `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
+          `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
+      );
     }
 
     // Check if we have a cached preimage for this challenge
