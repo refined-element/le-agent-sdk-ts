@@ -250,55 +250,60 @@ export class L402Client {
     payFn: PayInvoiceCallback,
     effectiveMax: number | undefined
   ): Promise<string> {
-    // Check invoice amount against limit (BOLT-11 decode and MPP explicit amount).
-    // When a limit applies, an amount we cannot determine is refused rather than
-    // paid: an unknown amount must never be read as "no limit applies".
-    if (effectiveMax !== undefined) {
-      let amountSats: number | undefined;
+    // Determine the invoice amount in sats (MPP explicit amount, else BOLT-11
+    // decode). This runs REGARDLESS of whether a ceiling is configured — the
+    // fail-closed rules below are split into two independent checks (ledger #71).
+    let amountSats: number | undefined;
 
-      // For MPP challenges with an explicit amount field, use it directly.
-      // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
-      if (!("macaroon" in challenge)) {
-        const mppAmount = (challenge as MppChallenge).amount;
-        if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
-          const parsed = Number(mppAmount);
-          if (
-            !Number.isFinite(parsed) ||
-            !Number.isSafeInteger(parsed) ||
-            parsed < 0
-          ) {
-            throw new Error(
-              `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
-            );
-          }
-          amountSats = parsed;
+    // For MPP challenges with an explicit amount field, use it directly.
+    // Only trust the MPP amount if it is strictly base-10 digits (non-negative integer).
+    if (!("macaroon" in challenge)) {
+      const mppAmount = (challenge as MppChallenge).amount;
+      if (typeof mppAmount === "string" && /^[0-9]+$/.test(mppAmount)) {
+        const parsed = Number(mppAmount);
+        if (
+          !Number.isFinite(parsed) ||
+          !Number.isSafeInteger(parsed) ||
+          parsed < 0
+        ) {
+          throw new Error(
+            `Invalid MPP amount "${mppAmount}" in challenge: must be a non-negative safe integer.`
+          );
         }
+        amountSats = parsed;
       }
+    }
 
-      // Fall back to BOLT-11 invoice decoding
-      if (amountSats === undefined) {
-        amountSats = decodeInvoiceAmountSats(challenge.invoice);
-      }
+    // Fall back to BOLT-11 invoice decoding
+    if (amountSats === undefined) {
+      amountSats = decodeInvoiceAmountSats(challenge.invoice);
+    }
 
-      // Reject no-amount invoices (security: could bypass budget checks).
-      // decodeInvoiceAmountSats() returns undefined both for invoices that
-      // encode no amount and for invoices we failed to parse; neither can be
-      // checked against the budget, so both are refused. A zero amount is an
-      // explicit "payer decides" and carries the same risk.
-      if (amountSats === undefined || amountSats <= 0) {
-        throw new Error(
-          `Invoice has no amount specified. For security, only invoices with ` +
-            `explicit amounts are supported when a maximum (${effectiveMax} sats) ` +
-            `is configured. Invoice: ${challenge.invoice.substring(0, 40)}...`
-        );
-      }
+    // Rule 1 (fail-closed core, ledger #71): an unknown/unbounded amount is
+    // ALWAYS refused, whether or not a ceiling is configured. Previously this
+    // check lived inside `if (effectiveMax !== undefined)`, so with no max the
+    // gate paid ANY invoice — a caller who forgot to set a ceiling delegated an
+    // unbounded, unaudited spend. decodeInvoiceAmountSats() returns undefined
+    // both for invoices that encode no amount and for invoices we failed to
+    // parse; a zero amount is an explicit "payer decides". None can be proven
+    // bounded, so all are refused even when no maximum is set.
+    if (amountSats === undefined || amountSats <= 0) {
+      throw new Error(
+        `Invoice has no amount specified (amountless, unparseable, or zero), so ` +
+          `it cannot be bounded and is refused — even when no maximum is ` +
+          `configured. Paying it would hand the wallet an unbounded amount. ` +
+          `Invoice: ${challenge.invoice.substring(0, 40)}...`
+      );
+    }
 
-      if (amountSats > effectiveMax) {
-        throw new Error(
-          `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
-            `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
-        );
-      }
+    // Rule 2: compare against the ceiling only when one is configured. With no
+    // max the caller has opted out of a limit for this KNOWN amount, which is
+    // their choice; the unknown-amount hole above is closed regardless.
+    if (effectiveMax !== undefined && amountSats > effectiveMax) {
+      throw new Error(
+        `Invoice amount (${amountSats} sats) exceeds maximum allowed ` +
+          `(${effectiveMax} sats). Invoice: ${challenge.invoice.substring(0, 40)}...`
+      );
     }
 
     // Check if we have a cached preimage for this challenge

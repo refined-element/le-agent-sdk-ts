@@ -878,11 +878,31 @@ describe("L402Client - unknown invoice amount is refused when a budget applies",
     expect(payCallback).not.toHaveBeenCalled();
   });
 
-  it("still pays an amountless invoice when no budget is configured (opt-out)", async () => {
-    // With no maxAmountSats there is no limit to bypass; the caller has
-    // explicitly opted out of budget enforcement.
+  it("refuses an amountless invoice even when no budget is configured (ledger #71)", async () => {
+    // Fail-closed core of #71: an amount that cannot be bounded is refused
+    // whether or not a ceiling is set. Previously this PAID — with no
+    // maxAmountSats the gate short-circuited and handed ANY invoice to the
+    // wallet, so a caller who forgot to set a ceiling opted into unbounded spend.
     fetchSpy.mockResolvedValueOnce(
       mockResponse(402, { "www-authenticate": NO_AMOUNT_L402_HEADER })
+    );
+
+    const payCallback = vi.fn().mockResolvedValue(VALID_PREIMAGE);
+    const client = new L402Client({ payInvoiceCallback: payCallback });
+
+    await expect(
+      client.access("https://example.com/resource")
+    ).rejects.toThrow(/no amount/i);
+    expect(payCallback).not.toHaveBeenCalled();
+  });
+
+  it("still pays a KNOWN amount when no budget is configured (opt-out preserved)", async () => {
+    // The other half of #71: the fail-closed fix must not force every payment
+    // to declare a max. lnbc100u1rest is a determinable 10,000-sat invoice;
+    // with no ceiling the caller has opted out of a limit for a known amount,
+    // so it is paid.
+    fetchSpy.mockResolvedValueOnce(
+      mockResponse(402, { "www-authenticate": L402_HEADER })
     );
     fetchSpy.mockResolvedValueOnce(mockResponse(200, {}, "ok"));
 
@@ -891,6 +911,6 @@ describe("L402Client - unknown invoice amount is refused when a budget applies",
 
     const res = await client.access("https://example.com/resource");
     expect(res.status).toBe(200);
-    expect(payCallback).toHaveBeenCalled();
+    expect(payCallback).toHaveBeenCalledWith("lnbc100u1rest");
   });
 });
