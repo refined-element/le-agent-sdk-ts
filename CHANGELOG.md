@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.4
+
+**Security fix — upgrade recommended.** Two fail-closed hardenings of L402 payment:
+
+- The amount/budget gate no longer pays an invoice whose amount can't be bounded when no `maxAmountSats` is configured (an unset max previously skipped the check and paid anything). Unknown/unbounded/non-positive amounts are refused regardless of the max; a known positive amount with no max still pays.
+- The BOLT11 amount decoder is now HRP-anchored, so a crafted invoice can't smuggle bech32 data-part digits into a bogus positive amount that would pass the budget check with a fabricated number.
+
 ## 0.3.3
 
 - **Packaging fix — 0.3.1 and 0.3.2 were not importable.** The published npm tarball was missing the compiled `dist/` output: `dist/` is git-ignored and the package declared no `files` allowlist, so `npm publish` (which falls back to `.gitignore`) stripped the build output even though CI built it, leaving `main`/`module`/`exports` pointing at files that were never shipped. Any `import`/`require` failed with `MODULE_NOT_FOUND`. Adds `"files": ["dist"]` so the compiled output is always included (and `src`/`tests` are no longer shipped). No API changes — 0.3.3 is the first npm-importable release carrying the 0.3.2 fixes.
